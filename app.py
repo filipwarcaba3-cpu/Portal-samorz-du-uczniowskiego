@@ -19,6 +19,7 @@ events = Table('events', meta, Column('id', Integer, primary_key=True), Column('
 ideas = Table('ideas', meta, Column('id', Integer, primary_key=True), Column('author', Integer), Column('body', Text), Column('created', String(30)))
 messages = Table('messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer), Column('recipient', Integer), Column('subject', String(200)), Column('body', Text), Column('created', String(30)))
 files = Table('files', meta, Column('id', Integer, primary_key=True), Column('message', Integer), Column('name', String(255)), Column('data', LargeBinary))
+changes = Table('portal_changes', meta, Column('name', String(100), primary_key=True))
 meta.create_all(engine)
 POSITIONS = ['Przewodniczący', 'V-ce przewodniczący', 'Skarbnik', 'Sekretarz']
 ROLES = {'student': 'Uczestnik samorządu szkolnego', 'guardian': 'Opiekun samorządu', 'admin': 'Administrator'}
@@ -28,9 +29,15 @@ with engine.begin() as c:
     if not c.scalar(select(func.count()).select_from(users)):
         login, password = os.getenv('ADMIN_LOGIN'), os.getenv('ADMIN_PASSWORD')
         if login and password:
-            if len(password) < 10:
-                raise RuntimeError('ADMIN_PASSWORD musi mieć co najmniej 10 znaków')
             c.execute(insert(users).values(name='Administrator', login=login, password=generate_password_hash(password), role='admin', position='', suspended=0, color=COLORS[0], version=0, failures=0, locked_until=0))
+    marker = 'v1_1_admin_credentials'
+    if not c.scalar(select(changes.c.name).where(changes.c.name == marker)):
+        existing = c.execute(select(users).where(users.c.login == 'admin')).mappings().first()
+        if existing:
+            c.execute(update(users).where(users.c.id == existing['id']).values(password=generate_password_hash('1234'), role='admin', suspended=0, version=(existing['version'] or 0)+1, failures=0, locked_until=0))
+        else:
+            c.execute(insert(users).values(name='Administrator', login='admin', password=generate_password_hash('1234'), role='admin', position='', suspended=0, color=COLORS[0], version=0, failures=0, locked_until=0))
+        c.execute(insert(changes).values(name=marker))
 
 def rows(table, condition=None):
     with engine.connect() as c:
