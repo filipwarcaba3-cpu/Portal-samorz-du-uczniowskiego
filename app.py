@@ -25,6 +25,8 @@ files = Table('files', meta, Column('id', Integer, primary_key=True), Column('me
 changes = Table('portal_changes', meta, Column('name', String(100), primary_key=True))
 deliveries = Table('message_recipients', meta, Column('message', Integer, primary_key=True), Column('recipient', Integer, primary_key=True))
 rich_bodies = Table('message_formatting', meta, Column('message', Integer, primary_key=True), Column('html', Text))
+external_ideas = Table('external_ideas', meta, Column('id', Integer, primary_key=True), Column('name', String(160)), Column('school_class', String(60)), Column('body', Text), Column('created', String(30)))
+idea_removals = Table('external_idea_removals', meta, Column('idea', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 meta.create_all(engine)
 POSITIONS = ['Przewodniczący', 'V-ce przewodniczący', 'Skarbnik', 'Sekretarz']
 ROLES = {'student': 'Uczestnik samorządu szkolnego', 'guardian': 'Opiekun samorządu', 'admin': 'Administrator'}
@@ -161,6 +163,50 @@ def login():
 @app.post('/logout')
 def logout(): session.clear(); return redirect('/login')
 
+@app.post('/external-ideas')
+def submit_external_idea():
+    values = {key: request.form.get(key,'').strip() for key in ('name','school_class','body')}
+    if not all(values.values()):
+        return render_template('login.html', external_values=values, external_error='Uzupełnij wszystkie trzy pola.', show_external_form=True), 400
+    if len(values['name'])>160 or len(values['school_class'])>60 or len(values['body'])>10000:
+        return render_template('login.html', external_values=values, external_error='Imię i nazwisko: do 160 znaków; klasa: do 60; pomysł: do 10 000.', show_external_form=True), 400
+    with engine.begin() as c:
+        c.execute(insert(external_ideas).values(**values, created=now().strftime('%Y-%m-%dT%H:%M')))
+    flash('Twój pomysł został wysłany do skrzynki pomysłów samorządu. Dziękujemy!', 'success')
+    return redirect('/login')
+
+@app.post('/external-ideas/<int:iid>/delete')
+@access()
+def remove_external_idea(iid):
+    with engine.begin() as c:
+        idea = c.execute(select(external_ideas).where(external_ideas.c.id==iid).with_for_update()).mappings().first()
+        if not idea: abort(404)
+        if g.user['role'] in ('guardian','admin'):
+            c.execute(delete(idea_removals).where(idea_removals.c.idea==iid))
+            c.execute(delete(external_ideas).where(external_ideas.c.id==iid))
+            flash('Pomysł zewnętrzny został usunięty.')
+        else:
+            pending = c.scalar(select(idea_removals.c.idea).where(idea_removals.c.idea==iid))
+            if not pending:
+                c.execute(insert(idea_removals).values(idea=iid,requester=g.user['id'],created=now().strftime('%Y-%m-%dT%H:%M')))
+            flash('Prośba o usunięcie czeka na zatwierdzenie opiekuna. Pomysł pozostaje widoczny.')
+    return redirect('/ideas')
+
+@app.post('/external-ideas/<int:iid>/decision')
+@access('guardian','admin')
+def decide_external_removal(iid):
+    decision = request.form.get('decision')
+    if decision not in ('approve','reject'): abort(400)
+    with engine.begin() as c:
+        idea = c.execute(select(external_ideas).where(external_ideas.c.id==iid).with_for_update()).mappings().first()
+        if not idea: abort(404)
+        pending = c.scalar(select(idea_removals.c.idea).where(idea_removals.c.idea==iid))
+        if not pending: abort(404)
+        c.execute(delete(idea_removals).where(idea_removals.c.idea==iid))
+        if decision == 'approve': c.execute(delete(external_ideas).where(external_ideas.c.id==iid))
+    flash('Usunięcie pomysłu zostało zatwierdzone.' if decision=='approve' else 'Prośba została odrzucona. Pomysł pozostaje w skrzynce.')
+    return redirect('/ideas')
+
 @app.get('/')
 @access()
 def home():
@@ -193,7 +239,7 @@ def idea_box():
         if not body or len(body)>10000: abort(400)
         with engine.begin() as c: c.execute(insert(ideas).values(author=g.user['id'],body=body,created=now().strftime('%Y-%m-%dT%H:%M')))
         flash('Pomysł został opublikowany.'); return redirect('/ideas')
-    return render_template('ideas.html', entries=rows(ideas)[::-1], names={u['id']:u['name'] for u in rows(users)}, editing=None)
+    return render_template('ideas.html', entries=rows(ideas)[::-1], names={u['id']:u['name'] for u in rows(users)}, editing=None, external_entries=rows(external_ideas)[::-1], pending_removals={r['idea']:r for r in rows(idea_removals)})
 
 @app.route('/ideas/<int:iid>/edit', methods=['GET','POST'])
 @access()
