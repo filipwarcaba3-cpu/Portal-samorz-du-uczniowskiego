@@ -112,7 +112,7 @@ def guard():
         found = rows(users, users.c.id == session['uid'])
         if found and found[0]['version'] == session.get('version'): g.user = found[0]
         else: session.clear()
-    if g.user and g.user['suspended'] and request.endpoint != 'health':
+    if g.user and g.user['suspended'] and request.endpoint not in ('health', 'logout'):
         return render_template('suspended.html'), 403
     if request.method == 'POST' and not secrets.compare_digest(session.get('csrf', ''), request.form.get('csrf', '')):
         abort(400)
