@@ -14,7 +14,7 @@ if dburl.startswith(('postgres://', 'postgresql://')):
     dburl = 'postgresql+psycopg://' + dburl.split('://', 1)[1]
 engine = create_engine(dburl, pool_pre_ping=True)
 meta = MetaData()
-users = Table('users', meta, Column('id', Integer, primary_key=True), Column('name', String(160)), Column('login', String(100), unique=True), Column('password', Text), Column('role', String(20)), Column('position', String(60)), Column('suspended', Integer, default=0), Column('color', String(20), default='#2563eb'), Column('version', Integer, default=0), Column('failures', Integer, default=0), Column('locked_until', Integer, default=0))
+users = Table('users', meta, Column('id', Integer, primary_key=True), Column('name', String(160)), Column('login', String(100), unique=True), Column('password', Text), Column('role', String(20)), Column('position', String(60)), Column('suspended', Integer, default=0), Column('color', String(20), default='#059669'), Column('version', Integer, default=0), Column('failures', Integer, default=0), Column('locked_until', Integer, default=0))
 events = Table('events', meta, Column('id', Integer, primary_key=True), Column('title', String(200)), Column('date', String(16)), Column('body', Text), Column('author', Integer))
 ideas = Table('ideas', meta, Column('id', Integer, primary_key=True), Column('author', Integer), Column('body', Text), Column('created', String(30)))
 messages = Table('messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer), Column('recipient', Integer), Column('subject', String(200)), Column('body', Text), Column('created', String(30)))
@@ -23,12 +23,13 @@ changes = Table('portal_changes', meta, Column('name', String(100), primary_key=
 meta.create_all(engine)
 POSITIONS = ['Przewodniczący', 'V-ce przewodniczący', 'Skarbnik', 'Sekretarz']
 ROLES = {'student': 'Uczestnik samorządu szkolnego', 'guardian': 'Opiekun samorządu', 'admin': 'Administrator'}
-COLORS = ['#2563eb', '#7c3aed', '#059669', '#db2777', '#d97706']
+COLORS = ['#059669', '#2563eb', '#dc2626', '#d97706', '#db2777']
 def now(): return datetime.now(ZoneInfo('Europe/Warsaw'))
 with engine.begin() as c:
     if not c.scalar(select(func.count()).select_from(users)):
         login, password = os.getenv('ADMIN_LOGIN'), os.getenv('ADMIN_PASSWORD')
         if login and password:
+            if len(password) < 4: raise RuntimeError('ADMIN_PASSWORD musi mieć co najmniej 4 znaki')
             c.execute(insert(users).values(name='Administrator', login=login, password=generate_password_hash(password), role='admin', position='', suspended=0, color=COLORS[0], version=0, failures=0, locked_until=0))
     marker = 'v1_1_admin_credentials'
     if not c.scalar(select(changes.c.name).where(changes.c.name == marker)):
@@ -70,7 +71,7 @@ def headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Cache-Control'] = 'no-store'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
     return response
 
 def access(*roles):
@@ -196,8 +197,8 @@ def management():
             position=request.form.get('position','') if role=='student' else ''
             if role=='student' and position not in POSITIONS: abort(400)
             name=request.form.get('name','').strip(); login=request.form.get('login','').strip(); password=request.form.get('password','')
-            if not name or not login or len(name)>160 or len(login)>100 or len(password)<10:
-                flash('Podaj imię i nazwisko, login i hasło co najmniej 10 znaków.'); return redirect(request.path)
+            if not name or not login or len(name)>160 or len(login)>100 or len(password)<4:
+                flash('Podaj imię i nazwisko, login i hasło co najmniej 4 znaki.'); return redirect(request.path)
             from sqlalchemy.exc import IntegrityError
             try:
                 with engine.begin() as c: c.execute(insert(users).values(name=name,login=login,password=generate_password_hash(password),role=role,position=position,suspended=0,color=COLORS[0],version=0,failures=0,locked_until=0))
@@ -222,7 +223,7 @@ def management():
                 elif action=='password':
                     if not isadmin: abort(403)
                     password=request.form.get('password','')
-                    if len(password)<10: flash('Hasło musi mieć co najmniej 10 znaków.'); return redirect(request.path)
+                    if len(password)<4: flash('Hasło musi mieć co najmniej 4 znaki.'); return redirect(request.path)
                     c.execute(update(users).where(users.c.id==uid).values(password=generate_password_hash(password),version=target['version']+1,failures=0,locked_until=0))
                 else: abort(400)
             flash('Zmiany zapisane.')
@@ -239,8 +240,8 @@ def profile():
         values={'color':color}
         password=request.form.get('password','')
         if password:
-            if len(password)<10 or not check_password_hash(g.user['password'],request.form.get('current_password','')):
-                flash('Podaj poprawne obecne hasło i nowe hasło co najmniej 10 znaków.'); return redirect('/profile')
+            if len(password)<4 or not check_password_hash(g.user['password'],request.form.get('current_password','')):
+                flash('Podaj poprawne obecne hasło i nowe hasło co najmniej 4 znaki.'); return redirect('/profile')
             values.update(password=generate_password_hash(password),version=g.user['version']+1)
         with engine.begin() as c: c.execute(update(users).where(users.c.id==g.user['id']).values(**values))
         if password: session['version']=values['version']
