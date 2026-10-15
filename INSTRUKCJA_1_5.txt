@@ -1,0 +1,41 @@
+Portal samorządu uczniowskiego — aktualizacja 1.5
+
+CO WGRAC NA GITHUB
+Podmień app.py w katalogu głównym oraz pięć plików w folderze templates:
+base.html, login.html, ideas.html, mail.html, message.html.
+Nie przenoś plików HTML do katalogu głównego. Pozostałe pliki pozostaw.
+Zapisz Commit changes. Na Renderze wybierz Manual Deploy > Deploy latest commit.
+Po wdrożeniu odśwież stronę Ctrl+F5.
+
+ZMIANY
+Poczta: wielu odbiorców, wyszukiwanie osób, wybrane osoby jako etykiety,
+edytor z formatowaniem tekstu, linkami, listami, tabelą, wyrównaniem,
+cofaniem i ponawianiem. Zdjęcia dodaje się jako załączniki.
+Załączniki: wybór wielu plików, przeciąganie, lista nazw i rozmiarów,
+usuwanie plików przed wysłaniem. Do 10 plików; 24 MB załączników
+w edytorze, aby zmieścić żądanie w dotychczasowym limicie 25 MB.
+Wysłana wiadomość występuje raz, z listą odbiorców. Każdy odbiorca
+ma dostęp do tej samej treści i załączników.
+Pomysły: wszystkie wpisy widoczne dla każdego zalogowanego użytkownika,
+z autorem i datą. Autor i administrator mogą edytować i usuwać wpis.
+Opiekun edytuje i usuwa własne wpisy, ale nie wpisy innych osób.
+Logowanie: zachowany styl szkoły i logo, dopracowane proporcje,
+usunięty odnośnik i komunikat o zapomnianym haśle.
+Motyw, kolory i minimum 4 znaków hasła pozostają z poprzedniej wersji.
+
+DANE
+Aplikacja dodaje dwie nowe tabele bazy automatycznie, bez usuwania danych.
+Starsza poczta i jej załączniki pozostają dostępne. Zachowaj ten sam
+DATABASE_URL prowadzący do trwałej bazy PostgreSQL. SQLite na nietrwałym
+dysku Rendera nie gwarantuje zachowania danych między wdrożeniami.
+Aktualizacja nie resetuje ponownie hasła administratora, jeśli wcześniejsza
+wersja zapisała już znacznik jednorazowego ustawienia konta.
+
+SPRAWDZENIE
+Testy klientem Flask: wielu odbiorców, brak duplikatów wiadomości,
+dostęp do załączników, starsza poczta, widoczność i autorstwo pomysłów,
+edycja i usuwanie przez autora/admina oraz odmowa dla innych osób,
+filtrowanie formatowania i uprawnienia.
+Przeglądarka lokalna: logowanie z logo, wybór dwóch testowych odbiorców,
+pogrubienie tekstu, wysłanie i otwarcie wiadomości z listą obu adresatów.
+Nie wykonano wdrożenia do Twojego Rendera ani testu na Twojej bazie.

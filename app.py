@@ -2,6 +2,9 @@ import os, secrets, io, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from functools import wraps
+from html import escape
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
 from flask import Flask, request, session, redirect, url_for, render_template, flash, abort, g, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Text, LargeBinary, select, insert, update, delete, func
@@ -20,11 +23,62 @@ ideas = Table('ideas', meta, Column('id', Integer, primary_key=True), Column('au
 messages = Table('messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer), Column('recipient', Integer), Column('subject', String(200)), Column('body', Text), Column('created', String(30)))
 files = Table('files', meta, Column('id', Integer, primary_key=True), Column('message', Integer), Column('name', String(255)), Column('data', LargeBinary))
 changes = Table('portal_changes', meta, Column('name', String(100), primary_key=True))
+deliveries = Table('message_recipients', meta, Column('message', Integer, primary_key=True), Column('recipient', Integer, primary_key=True))
+rich_bodies = Table('message_formatting', meta, Column('message', Integer, primary_key=True), Column('html', Text))
 meta.create_all(engine)
 POSITIONS = ['Przewodniczący', 'V-ce przewodniczący', 'Skarbnik', 'Sekretarz']
 ROLES = {'student': 'Uczestnik samorządu szkolnego', 'guardian': 'Opiekun samorządu', 'admin': 'Administrator'}
 COLORS = ['#059669', '#2563eb', '#dc2626', '#d97706', '#db2777']
 def now(): return datetime.now(ZoneInfo('Europe/Warsaw'))
+
+class MessageHTML(HTMLParser):
+    """Allow only document formatting; never accept executable markup."""
+    allowed = {'p','div','br','b','strong','i','em','u','s','ul','ol','li','blockquote','h2','h3','a','table','thead','tbody','tr','th','td','hr'}
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.stack = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.allowed: return
+        attributes = ''
+        if tag == 'a':
+            href = dict(attrs).get('href', '')
+            try: scheme = urlsplit(href).scheme.lower()
+            except ValueError: scheme = ''
+            if scheme in ('https','http','mailto'):
+                attributes = ' href="' + escape(href, quote=True) + '" rel="noopener noreferrer"'
+        if tag in ('p','div','h2','h3'):
+            align = dict(attrs).get('align','')
+            for class_name in dict(attrs).get('class','').split():
+                if class_name in ('align-left','align-center','align-right'): align = class_name[6:]
+            for declaration in dict(attrs).get('style','').split(';'):
+                key, _, value = declaration.partition(':')
+                if key.strip().lower() == 'text-align': align = value.strip().lower()
+            if align in ('left','center','right'): attributes += ' class="align-' + align + '"'
+        self.parts.append('<' + tag + attributes + '>')
+        if tag not in ('br','hr'): self.stack.append(tag)
+    def handle_endtag(self, tag):
+        if tag in self.stack:
+            while self.stack:
+                current = self.stack.pop()
+                self.parts.append('</' + current + '>')
+                if current == tag: break
+    def handle_data(self, data): self.parts.append(escape(data))
+    def result(self):
+        while self.stack: self.parts.append('</' + self.stack.pop() + '>')
+        return ''.join(self.parts)
+
+def clean_message_html(value):
+    parser = MessageHTML()
+    parser.feed(value)
+    return parser.result()
+
+def recipient_ids(message):
+    ids = [r['recipient'] for r in rows(deliveries, deliveries.c.message == message['id'])]
+    return ids or [message['recipient']]
+
+def can_read_message(message):
+    return g.user['id'] == message['sender'] or g.user['id'] in recipient_ids(message)
 with engine.begin() as c:
     if not c.scalar(select(func.count()).select_from(users)):
         login, password = os.getenv('ADMIN_LOGIN'), os.getenv('ADMIN_PASSWORD')
@@ -52,6 +106,7 @@ def token():
 
 @app.before_request
 def guard():
+    g.script_nonce = secrets.token_urlsafe(24)
     g.user = None
     if session.get('uid'):
         found = rows(users, users.c.id == session['uid'])
@@ -71,7 +126,7 @@ def headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Cache-Control'] = 'no-store'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'nonce-" + g.script_nonce + "'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
     return response
 
 def access(*roles):
@@ -137,31 +192,60 @@ def idea_box():
         body=request.form.get('body','').strip()
         if not body or len(body)>10000: abort(400)
         with engine.begin() as c: c.execute(insert(ideas).values(author=g.user['id'],body=body,created=now().strftime('%Y-%m-%dT%H:%M')))
-        flash('Pomysł został przekazany opiekunom.'); return redirect('/ideas')
-    entries=rows(ideas, ideas.c.author == g.user['id']) if g.user['role']=='student' else rows(ideas)
-    return render_template('ideas.html', entries=entries[::-1], names={u['id']:u['name'] for u in rows(users)})
+        flash('Pomysł został opublikowany.'); return redirect('/ideas')
+    return render_template('ideas.html', entries=rows(ideas)[::-1], names={u['id']:u['name'] for u in rows(users)}, editing=None)
+
+@app.route('/ideas/<int:iid>/edit', methods=['GET','POST'])
+@access()
+def edit_idea(iid):
+    found = rows(ideas, ideas.c.id == iid)
+    if not found: abort(404)
+    idea = found[0]
+    if idea['author'] != g.user['id'] and g.user['role'] != 'admin': abort(403)
+    if request.method == 'POST':
+        body = request.form.get('body','').strip()
+        if not body or len(body) > 10000: abort(400)
+        with engine.begin() as c: c.execute(update(ideas).where(ideas.c.id == iid).values(body=body))
+        flash('Pomysł został zaktualizowany.'); return redirect('/ideas')
+    return render_template('ideas.html', entries=[], names={u['id']:u['name'] for u in rows(users)}, editing=idea)
+
+@app.post('/ideas/<int:iid>/delete')
+@access()
+def delete_idea(iid):
+    found = rows(ideas, ideas.c.id == iid)
+    if not found: abort(404)
+    if found[0]['author'] != g.user['id'] and g.user['role'] != 'admin': abort(403)
+    with engine.begin() as c: c.execute(delete(ideas).where(ideas.c.id == iid))
+    flash('Pomysł został usunięty.'); return redirect('/ideas')
 
 @app.route('/mail', methods=['GET','POST'])
 @access()
 def mail():
     people=rows(users, users.c.id != g.user['id'])
     if request.method == 'POST':
-        try: recipient=int(request.form.get('recipient',''))
+        try: recipients=list(dict.fromkeys(int(uid) for uid in request.form.getlist('recipient')))
         except ValueError: abort(400)
-        if not any(u['id']==recipient for u in people): abort(400)
+        allowed = {u['id'] for u in people}
+        if not recipients or any(uid not in allowed for uid in recipients): abort(400)
         subject=request.form.get('subject','').strip()
         if not subject or len(subject)>200: abort(400)
         uploads=[f for f in request.files.getlist('attachments') if f.filename]
         if len(uploads)>10: abort(400, 'Maksymalnie 10 załączników.')
+        body = request.form.get('body','')
+        html = request.form.get('body_html','')
+        if len(body)>20000 or len(html)>100000: abort(400)
         with engine.begin() as c:
-            mid=c.execute(insert(messages).values(sender=g.user['id'],recipient=recipient,subject=subject,body=request.form.get('body','')[:20000],created=now().strftime('%Y-%m-%dT%H:%M'))).inserted_primary_key[0]
+            mid=c.execute(insert(messages).values(sender=g.user['id'],recipient=recipients[0],subject=subject,body=body,created=now().strftime('%Y-%m-%dT%H:%M'))).inserted_primary_key[0]
+            c.execute(insert(deliveries), [dict(message=mid,recipient=uid) for uid in recipients])
+            if html: c.execute(insert(rich_bodies).values(message=mid,html=clean_message_html(html)))
             for f in uploads:
                 name=f.filename.replace('\\','/').split('/')[-1][:255]
                 c.execute(insert(files).values(message=mid,name=name,data=f.read()))
         flash('Wiadomość wysłana.'); return redirect('/mail?folder=sent')
     sent=request.args.get('folder')=='sent'
-    entries=rows(messages, messages.c.sender==g.user['id']) if sent else rows(messages,messages.c.recipient==g.user['id'])
-    return render_template('mail.html',people=people,entries=entries[::-1],sent=sent,names={u['id']:u['name'] for u in rows(users)})
+    inbox = (messages.c.recipient==g.user['id']) | messages.c.id.in_(select(deliveries.c.message).where(deliveries.c.recipient==g.user['id']))
+    entries=rows(messages, messages.c.sender==g.user['id']) if sent else rows(messages,inbox)
+    return render_template('mail.html',people=people,entries=entries[::-1],sent=sent,names={u['id']:u['name'] for u in rows(users)}, recipients={m['id']:recipient_ids(m) for m in entries})
 
 @app.get('/mail/<int:mid>')
 @access()
@@ -169,10 +253,12 @@ def message(mid):
     found=rows(messages,messages.c.id==mid)
     if not found: abort(404)
     m=found[0]
-    if g.user['id'] not in (m['sender'],m['recipient']): abort(403)
+    if not can_read_message(m): abort(403)
     with engine.connect() as c:
         attachments=[dict(r) for r in c.execute(select(files.c.id,files.c.name).where(files.c.message==mid)).mappings()]
-    return render_template('message.html',m=m,attachments=attachments,names={u['id']:u['name'] for u in rows(users)})
+    formatted = rows(rich_bodies, rich_bodies.c.message == mid)
+    html = clean_message_html(formatted[0]['html']) if formatted else None
+    return render_template('message.html',m=m,attachments=attachments,names={u['id']:u['name'] for u in rows(users)}, recipients=recipient_ids(m), html=html)
 
 @app.get('/attachments/<int:fid>')
 @access()
@@ -180,7 +266,7 @@ def attachment(fid):
     found=rows(files,files.c.id==fid)
     if not found: abort(404)
     f=found[0]; m=rows(messages,messages.c.id==f['message'])
-    if not m or g.user['id'] not in (m[0]['sender'],m[0]['recipient']): abort(403)
+    if not m or not can_read_message(m[0]): abort(403)
     return send_file(io.BytesIO(f['data']),download_name=f['name'],as_attachment=True,mimetype='application/octet-stream')
 
 @app.route('/users', methods=['GET','POST'])
