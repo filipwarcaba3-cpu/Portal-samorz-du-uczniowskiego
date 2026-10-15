@@ -1,1 +1,112 @@
-{% extends 'base.html' %}{% block content %}<h1>Poczta</h1><p class="subtitle">Rozmowy, dokumenty i zdjęcia w jednym miejscu.</p><section class="card"><h2>Nowa wiadomość</h2><form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf() }}"><label>Odbiorca<select name="recipient" required><option value="">Wybierz osobę</option>{% for u in people %}<option value="{{ u.id }}">{{ u.name }} — {{ u.position or roles[u.role] }}</option>{% endfor %}</select></label><label>Temat<input name="subject" required maxlength="200"></label><label>Wiadomość<textarea name="body" maxlength="20000"></textarea></label><label>Załączniki — zdjęcia, PDF i inne pliki<input type="file" name="attachments" multiple></label><small>Maksymalnie 10 plików. Cała wiadomość do 25 MB.</small><p><button>Wyślij wiadomość</button></p></form></section><div class="tabs"><a href="/mail" class="{{ 'selected' if not sent }}">Odebrane</a><a href="/mail?folder=sent" class="{{ 'selected' if sent }}">Wysłane</a></div>{% for m in entries %}<a class="card mail-row" href="/mail/{{ m.id }}"><strong>{{ m.subject }}</strong><span>{{ names.get(m.recipient if sent else m.sender,'Usunięte konto') }}</span><small>{{ m.created|replace('T',' ') }}</small></a>{% else %}<section class="card">Brak wiadomości w tym folderze.</section>{% endfor %}{% endblock %}
+{% extends 'base.html' %}{% block content %}<h1>Poczta</h1><p class="subtitle">Napisz do jednej lub kilku osób i dołącz potrzebne pliki.</p><section class="card composer"><h2>Nowa wiadomość</h2><form id="compose-form" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf() }}"><div class="compose-row"><label for="recipient-search">Do:</label><div class="recipient-picker"><input id="recipient-search" type="search" placeholder="Wyszukaj odbiorców…" autocomplete="off" aria-label="Wyszukaj odbiorców"><div id="recipient-chips" class="recipient-chips" aria-live="polite"></div><details class="recipient-details" open><summary>Wybierz odbiorców <span id="recipient-count"></span></summary><div class="recipient-options">{% for u in people %}<label class="recipient-option" data-name="{{ u.name }} {{ u.position or roles[u.role] }}"><input type="checkbox" name="recipient" value="{{ u.id }}" data-label="{{ u.name }}"><span><strong>{{ u.name }}</strong><small>{{ u.position or roles[u.role] }}</small></span></label>{% else %}<p>Brak innych użytkowników.</p>{% endfor %}<p id="no-recipients" hidden>Brak osób pasujących do wyszukiwania.</p></div></details></div></div><div class="compose-row"><label for="subject">Temat:</label><input id="subject" name="subject" required maxlength="200"></div><div class="editor-shell"><div class="editor-toolbar" id="editor-toolbar" role="toolbar" aria-label="Formatowanie wiadomości" hidden><label class="sr-only" for="paragraph-style">Styl akapitu</label><select id="paragraph-style"><option value="p">Akapit</option><option value="h2">Nagłówek</option><option value="h3">Podtytuł</option><option value="blockquote">Cytat</option></select><button type="button" data-command="bold" title="Pogrubienie" aria-label="Pogrubienie"><b>B</b></button><button type="button" data-command="italic" title="Kursywa" aria-label="Kursywa"><i>I</i></button><button type="button" data-command="underline" title="Podkreślenie" aria-label="Podkreślenie"><u>U</u></button><span class="toolbar-separator"></span><button type="button" id="insert-link" title="Wstaw link" aria-label="Wstaw link">↗</button><button type="button" data-command="insertUnorderedList" title="Lista punktowana" aria-label="Lista punktowana">• ≡</button><button type="button" data-command="insertOrderedList" title="Lista numerowana" aria-label="Lista numerowana">1. ≡</button><button type="button" data-command="outdent" title="Zmniejsz wcięcie" aria-label="Zmniejsz wcięcie">⇤</button><button type="button" data-command="indent" title="Zwiększ wcięcie" aria-label="Zwiększ wcięcie">⇥</button><span class="toolbar-separator"></span><button type="button" id="attach-image" title="Załącz zdjęcie" aria-label="Załącz zdjęcie">▧</button><button type="button" data-command="formatBlock" data-value="blockquote" title="Cytat" aria-label="Cytat">❝</button><button type="button" id="insert-table" title="Wstaw tabelę" aria-label="Wstaw tabelę">▦</button><label class="sr-only" for="text-align">Wyrównanie</label><select id="text-align"><option value="justifyLeft">Do lewej</option><option value="justifyCenter">Do środka</option><option value="justifyRight">Do prawej</option></select><button type="button" data-command="removeFormat" title="Usuń formatowanie" aria-label="Usuń formatowanie">Tₓ</button><button type="button" data-command="undo" title="Cofnij" aria-label="Cofnij">↶</button><button type="button" data-command="redo" title="Ponów" aria-label="Ponów">↷</button></div><label for="plain-body" class="sr-only">Treść wiadomości</label><textarea id="plain-body" name="body" placeholder="Wpisz treść wiadomości" maxlength="20000"></textarea><div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-label="Treść wiadomości" aria-multiline="true" data-placeholder="Wpisz treść wiadomości" hidden></div><input type="hidden" name="body_html" id="body-html"></div><div class="attachment-heading">Załączniki:</div><small>Zdjęcia, PDF i inne pliki. Maksymalnie 10 plików, łącznie do 25 MB z wiadomością.</small><table class="attachment-table"><thead><tr><th>Nazwa</th><th>Wielkość</th><th>Akcje</th></tr></thead><tbody id="file-rows"></tbody></table><div id="drop-zone" class="drop-zone"><span>Upuść tutaj<br>lub</span><label class="file-label" for="attachments">Wybierz pliki</label><input type="file" id="attachments" name="attachments" multiple></div><p id="compose-status" role="status" class="compose-status"></p><div class="send-row"><button id="send-button">Wyślij</button></div></form></section><div class="tabs"><a href="/mail" class="{{ 'selected' if not sent }}">Odebrane</a><a href="/mail?folder=sent" class="{{ 'selected' if sent }}">Wysłane</a></div>{% for m in entries %}<a class="card mail-row" href="/mail/{{ m.id }}"><strong>{{ m.subject }}</strong><span>{% if sent %}{% for uid in recipients[m.id] %}{{ names.get(uid,'Usunięte konto') }}{{ ', ' if not loop.last }}{% endfor %}{% else %}{{ names.get(m.sender,'Usunięte konto') }}{% endif %}</span><small>{{ m.created|replace('T',' ') }}</small></a>{% else %}<section class="card">Brak wiadomości w tym folderze.</section>{% endfor %}<script nonce="{{ g.script_nonce }}">(() => {
+'use strict';
+const form = document.querySelector('#compose-form');
+if (!form) return;
+const search = document.querySelector('#recipient-search');
+const options = [...document.querySelectorAll('.recipient-option')];
+const chips = document.querySelector('#recipient-chips');
+const count = document.querySelector('#recipient-count');
+const status = document.querySelector('#compose-status');
+const editor = document.querySelector('#rich-editor');
+const plain = document.querySelector('#plain-body');
+const html = document.querySelector('#body-html');
+const toolbar = document.querySelector('#editor-toolbar');
+const attachments = document.querySelector('#attachments');
+const fileRows = document.querySelector('#file-rows');
+let selectedFiles = [];
+let savedRange = null;
+function selectedRecipients() { return options.filter(o => o.querySelector('input').checked); }
+function refreshRecipients() {
+  const selected = selectedRecipients();
+  chips.replaceChildren();
+  selected.forEach(option => {
+    const input = option.querySelector('input');
+    const chip = document.createElement('button');
+    chip.type = 'button'; chip.className = 'recipient-chip';
+    chip.textContent = input.dataset.label + ' ×';
+    chip.setAttribute('aria-label', 'Usuń odbiorcę: ' + input.dataset.label);
+    chip.addEventListener('click', () => { input.checked = false; refreshRecipients(); });
+    chips.append(chip);
+  });
+  count.textContent = selected.length ? '(' + selected.length + ')' : '';
+}
+search.addEventListener('input', () => {
+  const query = search.value.trim().toLocaleLowerCase('pl');
+  options.forEach(o => { o.hidden = !o.dataset.name.toLocaleLowerCase('pl').includes(query); });
+  document.querySelector('#no-recipients').hidden = options.some(o => !o.hidden);
+  document.querySelector('.recipient-details').open = true;
+});
+options.forEach(o => o.querySelector('input').addEventListener('change',refreshRecipients));
+refreshRecipients();
+function syncBody() { plain.value = editor.innerText; html.value = editor.innerHTML; }
+function restoreSelection() {
+  editor.focus();
+  if (savedRange && editor.contains(savedRange.commonAncestorContainer)) {
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(savedRange);
+  }
+}
+function command(name,value=null) {
+  restoreSelection(); document.execCommand(name,false,value); syncBody();
+}
+document.addEventListener('selectionchange', () => {
+  const selection = window.getSelection();
+  if (selection.rangeCount && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)) savedRange = selection.getRangeAt(0).cloneRange();
+});
+toolbar.querySelectorAll('button').forEach(button => button.addEventListener('mousedown', e => e.preventDefault()));
+toolbar.querySelectorAll('[data-command]').forEach(button => button.addEventListener('click', () => command(button.dataset.command,button.dataset.value || null)));
+document.querySelector('#paragraph-style').addEventListener('change', e => command('formatBlock',e.target.value));
+document.querySelector('#text-align').addEventListener('change',e => command(e.target.value));
+document.querySelector('#insert-link').addEventListener('click', () => {
+  const raw = window.prompt('Adres linku (https://…)');
+  if (!raw) return;
+  try {
+    const url = new URL(raw);
+    if (!['https:','http:','mailto:'].includes(url.protocol)) throw new Error();
+    command('createLink',url.href);
+  } catch { status.textContent = 'Podaj poprawny adres http, https lub mailto.'; }
+});
+document.querySelector('#insert-table').addEventListener('click', () => command('insertHTML','<table><tbody><tr><td>Komórka 1</td><td>Komórka 2</td></tr><tr><td>Komórka 3</td><td>Komórka 4</td></tr></tbody></table><p><br></p>'));
+document.querySelector('#attach-image').addEventListener('click',() => attachments.click());
+editor.addEventListener('input', syncBody);
+editor.addEventListener('paste', e => {
+  e.preventDefault(); command('insertText',e.clipboardData.getData('text/plain'));
+});
+editor.addEventListener('drop', e => e.preventDefault());
+editor.hidden = false; toolbar.hidden = false; plain.hidden = true;
+function sizeLabel(size) { return size < 1024*1024 ? (size/1024).toFixed(1)+' KB' : (size/1024/1024).toFixed(1)+' MB'; }
+function renderFiles() {
+  fileRows.replaceChildren();
+  selectedFiles.forEach((file,index) => {
+    const row = document.createElement('tr');
+    const name = document.createElement('td'); name.textContent = file.name;
+    const size = document.createElement('td'); size.textContent = sizeLabel(file.size);
+    const actions = document.createElement('td');
+    const remove = document.createElement('button'); remove.type='button'; remove.className='secondary'; remove.textContent='Usuń';
+    remove.setAttribute('aria-label','Usuń załącznik: '+file.name);
+    remove.addEventListener('click',() => { selectedFiles.splice(index,1); renderFiles(); });
+    actions.append(remove); row.append(name,size,actions); fileRows.append(row);
+  });
+  const transfer = new DataTransfer(); selectedFiles.forEach(f => transfer.items.add(f)); attachments.files = transfer.files;
+}
+function addFiles(files) {
+  const proposed = [...selectedFiles];
+  [...files].forEach(f => { if (!proposed.some(old => old.name===f.name && old.size===f.size && old.lastModified===f.lastModified)) proposed.push(f); });
+  if (proposed.length > 10 || proposed.reduce((sum,f)=>sum+f.size,0) > 24*1024*1024) {
+    status.textContent='Możesz dodać do 10 plików. Załączniki mogą zajmować do 24 MB, aby cała wiadomość zmieściła się w limicie 25 MB.';
+    renderFiles(); return;
+  }
+  selectedFiles=proposed; status.textContent=''; renderFiles();
+}
+attachments.addEventListener('change', () => addFiles(attachments.files));
+const dropZone = document.querySelector('#drop-zone');
+['dragenter','dragover'].forEach(event => dropZone.addEventListener(event,e => { e.preventDefault(); dropZone.classList.add('drag-over'); }));
+['dragleave','drop'].forEach(event => dropZone.addEventListener(event,e => { e.preventDefault(); dropZone.classList.remove('drag-over'); }));
+dropZone.addEventListener('drop',e => addFiles(e.dataTransfer.files));
+form.addEventListener('submit',e => {
+  syncBody();
+  if (!selectedRecipients().length) { e.preventDefault(); status.textContent='Wybierz przynajmniej jednego odbiorcę.'; search.focus(); return; }
+  if (plain.value.length > 20000 || html.value.length > 100000) { e.preventDefault(); status.textContent='Wiadomość jest zbyt długa (maksymalnie 20 000 znaków).'; return; }
+  document.querySelector('#send-button').textContent='Wysyłanie…';
+});
+})();
+</script>{% endblock %}
