@@ -429,7 +429,7 @@ def cast_ballot(poll_id, option_id, kind, display_name, school_class='', interna
         return False, 'Już oddałeś/aś głos.'
 
 @app.post('/voting/polls/<int:poll_id>/vote')
-@access()
+@access('student','guardian','admin')
 def cast_internal_vote(poll_id):
     try: option_id=int(request.form.get('option_id',''))
     except ValueError: abort(400)
