@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Głosowania</h1>
-<p class="subtitle">Pomysły trafiają do głosowania dopiero po zatwierdzeniu przez opiekuna. Głosy są tajne.</p>
+<p class="subtitle">Opiekun może zatwierdzić albo odrzucić pomysł ucznia. Uczestnicy, opiekunowie i administratorzy mogą głosować; wyniki nie pokazują, kto wybrał daną opcję.</p>
 <div class="tabs voting-tabs">
   <a class="{{ 'selected' if tab=='pending' }}" href="/voting?tab=pending">Pomysły oczekujące <span class="count-pill">{{ pending_requests|length }}</span></a>
   <a class="{{ 'selected' if tab=='created' }}" href="/voting?tab=created">Utworzone głosowania</a>
