@@ -15,13 +15,16 @@
       <div class="idea-meta"><div><span class="badge">{{ 'Pomysł zewnętrzny' if item.source_type=='external' else 'Pomysł użytkownika portalu' }}</span><h3>{{ item.author_name }}</h3>{% if item.school_class %}<small>Klasa: {{ item.school_class }}</small>{% endif %}</div><small>Zgłoszono przez {{ item.requester_name }} · {{ item.created|replace('T',' ') }}</small></div>
       <p class="pre">{{ item.body }}</p>
       {% if g.user.role in ['guardian','admin'] %}
+        <div class="form-actions">
         <details class="approval-box"><summary>Zatwierdź i dodaj do głosowania</summary>
           <form method="post" action="/voting/requests/{{ item.id }}"><input type="hidden" name="csrf" value="{{ csrf() }}">
             <label>Dodaj do istniejącego głosowania<select name="poll_id"><option value="">Wybierz głosowanie albo utwórz nowe</option>{% for poll in draft_polls %}<option value="{{ poll.id }}">{{ poll.title }}</option>{% endfor %}</select></label>
             <p class="muted-note">Albo utwórz nowe głosowanie:</p><label>Nazwa głosowania<input name="new_poll_title" maxlength="200" placeholder="Np. Wybór pomysłu na kiermasz"></label>
-            <div class="form-actions"><button name="action" value="approve">Zapisz i zatwierdź</button><button class="danger" name="action" value="reject">Odrzuć pomysł</button><a class="button secondary" class="button danger" href="/voting?tab=pending">Anuluj</a></div>
+            <div class="form-actions"><button name="action" value="approve">Zapisz i zatwierdź</button><a class="button secondary" href="/voting?tab=pending">Anuluj</a></div>
           </form>
         </details>
+        <form method="post" action="/voting/requests/{{ item.id }}" onsubmit="return confirm('Czy na pewno odrzucić ten pomysł?')"><input type="hidden" name="csrf" value="{{ csrf() }}"><button class="danger" name="action" value="reject">Odrzuć pomysł</button></form>
+        </div>
       {% endif %}
     </section>
   {% else %}<section class="card"><p>Nie ma pomysłów czekających na zatwierdzenie.</p></section>{% endfor %}
@@ -34,7 +37,7 @@
       {% if poll.state=='draft' and g.user.role in ['guardian','admin'] %}
         <details class="approval-box"><summary>Rozpocznij głosowanie</summary><form method="post" action="/voting/polls/{{ poll.id }}/schedule"><input type="hidden" name="csrf" value="{{ csrf() }}"><div class="form-grid"><label>Od kiedy można głosować<input type="datetime-local" name="starts_at" required></label><label>Kiedy koniec głosowania<input type="datetime-local" name="ends_at" required></label></div><div class="form-actions"><button>Ustaw czas głosowania</button><a class="button danger" href="/voting?tab=created">Anuluj</a></div></form></details>
       {% elif poll.state=='scheduled' %}<p class="notice">Głosowanie rozpocznie się {{ poll.starts_at|replace('T',' ')|replace('+01:00','')|replace('+02:00','') }}.</p>
-      {% elif poll.state=='open' %}<p class="notice">Głosowanie trwa do {{ poll.ends_at|replace('T',' ')|replace('+01:00','')|replace('+02:00','') }}. Wyniki zostaną pokazane po zakończeniu.</p>{% if poll.already_voted %}<p class="success-note">Twój głos został już zapisany.</p>{% else %}<form method="post" action="/voting/polls/{{ poll.id }}/vote"><input type="hidden" name="csrf" value="{{ csrf() }}"><fieldset class="ballot"><legend>Oddaj głos</legend>{% for option in poll.options %}<label class="ballot-choice"><input type="radio" name="option_id" value="{{ option.id }}" required><span><strong>{{ option.author_name }}</strong><br>{{ option.body }}</span></label>{% endfor %}<button>Oddaj głos</button></fieldset></form>{% endif %}
+      {% elif poll.state=='open' %}<p class="notice">Głosowanie trwa do {{ poll.ends_at|replace('T',' ')|replace('+01:00','')|replace('+02:00','') }}. Wyniki zostaną pokazane po zakończeniu.{% if g.user.role=='guardian' %} Opiekunowie również mogą głosować.{% endif %}</p>{% if poll.already_voted %}<p class="success-note">Twój głos został już zapisany.</p>{% else %}<form method="post" action="/voting/polls/{{ poll.id }}/vote"><input type="hidden" name="csrf" value="{{ csrf() }}"><fieldset class="ballot"><legend>Oddaj głos</legend>{% for option in poll.options %}<label class="ballot-choice"><input type="radio" name="option_id" value="{{ option.id }}" required><span><strong>{{ option.author_name }}</strong><br>{{ option.body }}</span></label>{% endfor %}<button>Oddaj głos</button></fieldset></form>{% endif %}
       {% else %}<a class="button secondary" href="/voting?tab=results&amp;poll_id={{ poll.id }}">Zobacz wyniki</a>{% endif %}
     </section>
   {% else %}<section class="card"><p>Nie utworzono jeszcze żadnego głosowania. Zatwierdź pomysł w zakładce „Pomysły oczekujące”.</p></section>{% endfor %}
