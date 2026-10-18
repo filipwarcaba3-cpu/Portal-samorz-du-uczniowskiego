@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlsplit
 from flask import Flask, request, session, redirect, url_for, render_template, flash, abort, g, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, BigInteger, String, Text, LargeBinary, UniqueConstraint, select, insert, update, delete, func
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, BigInteger, String, Text, LargeBinary, UniqueConstraint, select, insert, update, delete, func, inspect
 from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__)
@@ -29,13 +29,23 @@ rich_bodies = Table('message_formatting', meta, Column('message', Integer, prima
 external_ideas = Table('external_ideas', meta, Column('id', Integer, primary_key=True), Column('name', String(160)), Column('school_class', String(60)), Column('body', Text), Column('created', String(30)))
 idea_removals = Table('external_idea_removals', meta, Column('idea', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 vote_requests = Table('vote_requests', meta, Column('id', Integer, primary_key=True), Column('source_type', String(20), nullable=False), Column('source_id', Integer, nullable=False), Column('requester', Integer), Column('author_name', String(160)), Column('school_class', String(60)), Column('body', Text), Column('status', String(20), nullable=False, default='pending'), Column('poll_id', Integer), Column('created', String(30)), UniqueConstraint('source_type','source_id',name='uq_vote_request_source'))
-polls = Table('polls', meta, Column('id', Integer, primary_key=True), Column('title', String(200), nullable=False), Column('created_by', Integer), Column('created', String(30)), Column('starts_at', String(40)), Column('ends_at', String(40)))
+polls = Table('polls', meta, Column('id', Integer, primary_key=True), Column('title', String(200), nullable=False), Column('created_by', Integer), Column('created', String(30)), Column('starts_at', String(40)), Column('ends_at', String(40)), Column('results_public', Integer, nullable=False, default=0, server_default='0'))
 poll_options = Table('poll_options', meta, Column('id', Integer, primary_key=True), Column('poll_id', Integer, nullable=False), Column('source_type', String(20)), Column('source_id', Integer), Column('author_name', String(160)), Column('school_class', String(60)), Column('body', Text, nullable=False), Column('created', String(30)))
 poll_voters = Table('poll_voters', meta, Column('id', BigInteger, primary_key=True), Column('poll_id', Integer, nullable=False), Column('kind', String(20), nullable=False), Column('internal_user', Integer), Column('external_key', String(64)), Column('ballot_key', String(64), unique=True), Column('display_name', String(160)), Column('school_class', String(60)), Column('created', String(30)), Column('anonymized', Integer, default=0), UniqueConstraint('poll_id','internal_user',name='uq_poll_internal_voter'), UniqueConstraint('poll_id','external_key',name='uq_poll_external_voter'))
 secret_ballots = Table('secret_ballots', meta, Column('id', BigInteger, primary_key=True), Column('ballot_key', String(64), unique=True, nullable=False), Column('poll_id', Integer, nullable=False), Column('option_id', Integer, nullable=False))
 poll_voter_removals = Table('poll_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
+poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
+login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)))
 portal_settings = Table('portal_settings', meta, Column('key', String(100), primary_key=True), Column('value', Text, nullable=False))
 meta.create_all(engine)
+if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
+    try:
+        with engine.begin() as c:
+            c.exec_driver_sql("ALTER TABLE polls ADD COLUMN results_public INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        # Multiple Render workers may try the one-time migration at startup.
+        if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
+            raise
 try:
     with engine.begin() as c:
         if not c.scalar(select(portal_settings.c.key).where(portal_settings.c.key=='external_voter_hash_secret')):
@@ -136,6 +146,43 @@ def rows(table, condition=None):
         if condition is not None: q = q.where(condition)
         return [dict(r) for r in c.execute(q).mappings()]
 
+LOGIN_SCREEN_DEFAULTS = {
+    'info_title': 'Zespół Szkół Muzycznych',
+    'info_body': 'im. Michała Spisaka w Dąbrowie Górniczej\nhttps://www.gov.pl/web/zsmdabrowa',
+    'ideas_title': 'Skrzynka pomysłów',
+    'ideas_body': 'Masz pomysł dla naszej szkoły? Przekaż go samorządowi bez logowania.',
+    'voting_title': 'Głosowania',
+    'voting_body': 'Możesz oddać głos także bez logowania.',
+    'results_title': 'Wyniki głosowań',
+    'results_body': 'Zobacz wyniki udostępnione przez opiekunów samorządu.'
+}
+
+def login_screen_values():
+    values = dict(LOGIN_SCREEN_DEFAULTS)
+    prefix = 'login_screen_'
+    for setting in rows(portal_settings):
+        if setting['key'].startswith(prefix):
+            key = setting['key'][len(prefix):]
+            if key in values: values[key] = setting['value']
+    return values
+
+def published_results():
+    result = []
+    for poll in sorted(rows(polls, polls.c.results_public == 1), key=lambda p:p['id'], reverse=True):
+        if poll_state(poll) != 'closed': continue
+        options = rows(poll_options, poll_options.c.poll_id == poll['id'])
+        ballots = rows(secret_ballots, secret_ballots.c.poll_id == poll['id'])
+        counts = [dict(option, votes=sum(ballot['option_id'] == option['id'] for ballot in ballots)) for option in options]
+        result.append(dict(poll=poll, options=counts, total=sum(option['votes'] for option in counts)))
+    return result
+
+def render_login_page(**extra):
+    with engine.connect() as c:
+        announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.image_data.is_not(None).label('has_image')).order_by(login_announcements.c.id.desc())).mappings()]
+    values = dict(screen=login_screen_values(), announcements=announcements, public_results=published_results())
+    values.update(extra)
+    return render_template('login.html', **values)
+
 def token():
     if 'csrf' not in session: session['csrf'] = secrets.token_urlsafe(32)
     return session['csrf']
@@ -192,7 +239,7 @@ def login():
             failures = (u['failures'] or 0) + 1
             with engine.begin() as c: c.execute(update(users).where(users.c.id == u['id']).values(failures=failures, locked_until=int(time.time())+300 if failures >= 5 else 0))
         flash('Nieprawidłowe dane logowania lub konto czasowo zablokowane.')
-    return render_template('login.html')
+    return render_login_page()
 
 @app.post('/logout')
 def logout(): session.clear(); return redirect('/login')
@@ -201,13 +248,92 @@ def logout(): session.clear(); return redirect('/login')
 def submit_external_idea():
     values = {key: request.form.get(key,'').strip() for key in ('name','school_class','body')}
     if not all(values.values()):
-        return render_template('login.html', external_values=values, external_error='Uzupełnij wszystkie trzy pola.', show_external_form=True), 400
+        return render_login_page(external_values=values, external_error='Uzupełnij wszystkie trzy pola.', show_external_form=True), 400
     if len(values['name'])>160 or len(values['school_class'])>60 or len(values['body'])>10000:
-        return render_template('login.html', external_values=values, external_error='Imię i nazwisko: do 160 znaków; klasa: do 60; pomysł: do 10 000.', show_external_form=True), 400
+        return render_login_page(external_values=values, external_error='Imię i nazwisko: do 160 znaków; klasa: do 60; pomysł: do 10 000.', show_external_form=True), 400
     with engine.begin() as c:
         c.execute(insert(external_ideas).values(**values, created=now().strftime('%Y-%m-%dT%H:%M')))
     flash('Twój pomysł został wysłany do skrzynki pomysłów samorządu. Dziękujemy!', 'success')
     return redirect('/login')
+
+@app.route('/admin/login-screen', methods=['GET','POST'])
+@access('admin')
+def manage_login_screen():
+    if request.method == 'POST':
+        values = {key:request.form.get(key,'').strip() for key in LOGIN_SCREEN_DEFAULTS}
+        limits = {'info_title':160,'info_body':1000,'ideas_title':100,'ideas_body':500,'voting_title':100,'voting_body':500,'results_title':100,'results_body':500}
+        if any(not values[key] or len(values[key]) > limit for key,limit in limits.items()):
+            flash('Uzupełnij wszystkie pola i sprawdź ich długość.', 'error')
+            return render_template('login_screen_admin.html', screen=values), 400
+        else:
+            with engine.begin() as c:
+                for key,value in values.items():
+                    setting_key='login_screen_'+key
+                    exists=c.scalar(select(portal_settings.c.key).where(portal_settings.c.key==setting_key))
+                    if exists: c.execute(update(portal_settings).where(portal_settings.c.key==setting_key).values(value=value))
+                    else: c.execute(insert(portal_settings).values(key=setting_key,value=value))
+            flash('Zapisano treść publicznego ekranu logowania.', 'success')
+            return redirect('/admin/login-screen')
+    return render_template('login_screen_admin.html', screen=login_screen_values())
+
+def read_announcement_png():
+    upload=request.files.get('image')
+    if not upload or not upload.filename: return None
+    data=upload.stream.read(5*1024*1024+1)
+    if len(data)>5*1024*1024: raise ValueError('Obraz PNG może mieć maksymalnie 5 MB.')
+    if len(data)<24 or not data.startswith(b'\x89PNG\r\n\x1a\n') or data[12:16]!=b'IHDR':
+        raise ValueError('Załącznik musi być poprawnym obrazem PNG.')
+    width=int.from_bytes(data[16:20],'big')
+    height=int.from_bytes(data[20:24],'big')
+    if not width or not height or width*height>25_000_000:
+        raise ValueError('Obraz PNG ma nieprawidłowe lub zbyt duże wymiary.')
+    return data
+
+@app.route('/announcements', methods=['GET','POST'])
+@access('guardian','admin')
+def manage_announcements():
+    if request.method == 'POST':
+        action=request.form.get('action','create')
+        try:
+            if action == 'delete':
+                announcement_id=int(request.form.get('announcement_id',''))
+                with engine.begin() as c:
+                    removed=c.execute(delete(login_announcements).where(login_announcements.c.id==announcement_id))
+                    if not removed.rowcount: abort(404)
+                flash('Usunięto ogłoszenie.', 'success')
+            elif action in ('create','edit'):
+                title=request.form.get('title','').strip()
+                body=request.form.get('body','').strip()
+                if not title or len(title)>160 or not body or len(body)>10000: raise ValueError('Wpisz tytuł (maks. 160 znaków) i treść (maks. 10 000 znaków).')
+                image=read_announcement_png()
+                with engine.begin() as c:
+                    if action=='create':
+                        c.execute(insert(login_announcements).values(title=title,body=body,image_data=image,created=now().isoformat(timespec='minutes')))
+                    else:
+                        announcement_id=int(request.form.get('announcement_id',''))
+                        record=c.execute(select(login_announcements).where(login_announcements.c.id==announcement_id).with_for_update()).mappings().first()
+                        if not record: abort(404)
+                        values={'title':title,'body':body}
+                        if request.form.get('remove_image')=='1': values['image_data']=None
+                        elif image is not None: values['image_data']=image
+                        c.execute(update(login_announcements).where(login_announcements.c.id==announcement_id).values(**values))
+                flash('Zapisano ogłoszenie.', 'success')
+            else: abort(400)
+        except ValueError as error:
+            flash(str(error), 'error')
+        return redirect('/announcements')
+    with engine.connect() as c:
+        announcements=[dict(r) for r in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body,login_announcements.c.created,login_announcements.c.image_data.is_not(None).label('has_image')).order_by(login_announcements.c.id.desc())).mappings()]
+    return render_template('announcements.html', announcements=announcements)
+
+@app.get('/login-announcements/<int:announcement_id>/image')
+def login_announcement_image(announcement_id):
+    found=rows(login_announcements, login_announcements.c.id==announcement_id)
+    if not found or not found[0]['image_data']: abort(404)
+    response=send_file(io.BytesIO(found[0]['image_data']),mimetype='image/png',as_attachment=False,conditional=False)
+    response.headers['Content-Disposition']='inline'
+    response.headers['Cache-Control']='no-store'
+    return response
 
 @app.post('/external-ideas/<int:iid>/delete')
 @access()
@@ -329,12 +455,16 @@ def nominate_idea(source_type, item_id):
 def voting_page_data(tab, selected_id=None):
     people = {u['id']:u['name'] for u in rows(users)}
     poll_rows = sorted(rows(polls), key=lambda p:p['id'], reverse=True)
+    deletion_requests = rows(poll_deletion_requests)
+    titles = {poll['id']:poll['title'] for poll in poll_rows}
+    deletion_by_poll = {item['poll_id']:dict(item, requester_name=people.get(item['requester'],'Usunięte konto'),title=titles.get(item['poll_id'],'Głosowanie')) for item in deletion_requests}
     enriched = []
     for poll in poll_rows:
         item = dict(poll)
         item['state'] = poll_state(poll)
         item['options'] = rows(poll_options, poll_options.c.poll_id==poll['id'])
         item['already_voted'] = bool(rows(poll_voters, (poll_voters.c.poll_id==poll['id']) & (poll_voters.c.internal_user==g.user['id'])))
+        item['deletion_request'] = deletion_by_poll.get(poll['id'])
         enriched.append(item)
     pending = [dict(r, requester_name=people.get(r['requester'],'Usunięte konto')) for r in rows(vote_requests, vote_requests.c.status=='pending')]
     pending.sort(key=lambda r:r['created'] or '', reverse=True)
@@ -354,15 +484,139 @@ def voting_page_data(tab, selected_id=None):
         voters_internal.sort(key=lambda v:v['display_name'] or '')
         voters_external.sort(key=lambda v:v['display_name'] or '')
         detail = dict(poll=selected, options=options, internal_voters=voters_internal, external_voters=voters_external)
-    return dict(tab=tab, pending_requests=pending, all_polls=enriched, draft_polls=[p for p in enriched if p['state']=='draft'], active_polls=active, finished_polls=finished, selected_poll=selected, detail=detail, people=people)
+    return dict(tab=tab, pending_requests=pending, all_polls=enriched, draft_polls=[p for p in enriched if p['state']=='draft'], active_polls=active, finished_polls=finished, selected_poll=selected, detail=detail, people=people, deletion_requests=[deletion_by_poll[p['id']] for p in enriched if p['id'] in deletion_by_poll])
+
+def delete_unstarted_poll(c, poll_id):
+    poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+    if not poll: abort(404)
+    if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można usuwać tylko głosowania, które jeszcze się nie rozpoczęły.')
+    options=[dict(r) for r in c.execute(select(poll_options).where(poll_options.c.poll_id==poll_id)).mappings()]
+    for option in options:
+        if option['source_type'] in ('internal','external') and option['source_id']:
+            c.execute(update(vote_requests).where(vote_requests.c.source_type==option['source_type'],vote_requests.c.source_id==option['source_id'],vote_requests.c.poll_id==poll_id).values(status='pending',poll_id=None))
+    voter_ids=[r['id'] for r in c.execute(select(poll_voters.c.id).where(poll_voters.c.poll_id==poll_id)).mappings()]
+    if voter_ids: c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id.in_(voter_ids)))
+    c.execute(delete(secret_ballots).where(secret_ballots.c.poll_id==poll_id))
+    c.execute(delete(poll_voters).where(poll_voters.c.poll_id==poll_id))
+    c.execute(delete(poll_options).where(poll_options.c.poll_id==poll_id))
+    c.execute(delete(poll_deletion_requests).where(poll_deletion_requests.c.poll_id==poll_id))
+    c.execute(delete(polls).where(polls.c.id==poll_id))
 
 @app.get('/voting')
 @access()
 def voting():
     tab = request.args.get('tab','pending')
-    if tab not in ('pending','created','results'): tab='pending'
+    if tab not in ('pending','created','results','delete-requests'): tab='pending'
+    if tab=='delete-requests' and g.user['role']!='admin': abort(403)
     selected_id = request.args.get('poll_id', type=int)
     return render_template('voting.html', **voting_page_data(tab, selected_id))
+
+@app.post('/voting/polls/<int:poll_id>/edit')
+@access('guardian','admin')
+def edit_unstarted_poll(poll_id):
+    title=request.form.get('title','').strip()
+    start_value=request.form.get('starts_at','').strip()
+    end_value=request.form.get('ends_at','').strip()
+    if not title or len(title)>200:
+        flash('Nazwa głosowania musi mieć od 1 do 200 znaków.', 'error')
+        return redirect('/voting?tab=created')
+    if bool(start_value) != bool(end_value):
+        flash('Podaj obie daty albo pozostaw obie puste.', 'error')
+        return redirect('/voting?tab=created')
+    start=end=None
+    if start_value:
+        start=local_datetime(start_value)
+        end=local_datetime(end_value)
+        if start<=now() or end<=start:
+            flash('Data początku musi być w przyszłości, a koniec późniejszy od początku.', 'error')
+            return redirect('/voting?tab=created')
+    with engine.begin() as c:
+        poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+        if not poll: abort(404)
+        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Nie można edytować głosowania, które już się rozpoczęło.')
+        if start and not c.scalar(select(func.count()).select_from(poll_options).where(poll_options.c.poll_id==poll_id)):
+            flash('Dodaj co najmniej jeden pomysł przed ustawieniem dat głosowania.', 'error')
+            return redirect('/voting?tab=created')
+        c.execute(update(polls).where(polls.c.id==poll_id).values(title=title,starts_at=start.isoformat(timespec='minutes') if start else None,ends_at=end.isoformat(timespec='minutes') if end else None))
+    flash('Zapisano zmiany w głosowaniu.', 'success')
+    return redirect('/voting?tab=created')
+
+@app.post('/voting/polls/<int:poll_id>/options/<int:option_id>/remove')
+@access('guardian','admin')
+def remove_poll_option(poll_id, option_id):
+    with engine.begin() as c:
+        poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+        option=c.execute(select(poll_options).where(poll_options.c.id==option_id,poll_options.c.poll_id==poll_id).with_for_update()).mappings().first()
+        if not poll or not option: abort(404)
+        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Pomysł można usunąć tylko przed rozpoczęciem głosowania.')
+        if option['source_type'] in ('internal','external') and option['source_id']:
+            c.execute(update(vote_requests).where(vote_requests.c.source_type==option['source_type'],vote_requests.c.source_id==option['source_id'],vote_requests.c.poll_id==poll_id).values(status='pending',poll_id=None))
+        c.execute(delete(poll_options).where(poll_options.c.id==option_id))
+    flash('Usunięto pomysł z głosowania. Zgłoszenie wróciło do oczekujących.', 'success')
+    return redirect('/voting?tab=created')
+
+@app.post('/voting/polls/<int:poll_id>/delete-request')
+@access('guardian','admin')
+def request_poll_deletion(poll_id):
+    with engine.begin() as c:
+        poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+        if not poll: abort(404)
+        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można usuwać tylko głosowania, które jeszcze się nie rozpoczęły.')
+        if g.user['role']=='admin':
+            delete_unstarted_poll(c,poll_id)
+            flash('Usunięto nie rozpoczęte głosowanie.', 'success')
+        else:
+            exists=c.scalar(select(poll_deletion_requests.c.poll_id).where(poll_deletion_requests.c.poll_id==poll_id))
+            if exists: flash('Prośba o usunięcie tego głosowania już czeka na administratora.')
+            else:
+                c.execute(insert(poll_deletion_requests).values(poll_id=poll_id,requester=g.user['id'],created=now().isoformat(timespec='minutes')))
+                flash('Wysłano prośbę o usunięcie do administratora.', 'success')
+    return redirect('/voting?tab=created')
+
+@app.post('/voting/poll-deletion-requests/<int:poll_id>')
+@access('admin')
+def decide_poll_deletion(poll_id):
+    action=request.form.get('action')
+    if action not in ('approve','reject'): abort(400)
+    with engine.begin() as c:
+        pending=c.execute(select(poll_deletion_requests).where(poll_deletion_requests.c.poll_id==poll_id).with_for_update()).mappings().first()
+        if not pending: abort(404)
+        if action=='approve':
+            poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+            if poll and poll_state(poll) in ('draft','scheduled'):
+                delete_unstarted_poll(c,poll_id)
+                flash('Zatwierdzono prośbę i usunięto głosowanie.', 'success')
+            else:
+                c.execute(delete(poll_deletion_requests).where(poll_deletion_requests.c.poll_id==poll_id))
+                flash('Głosowanie już się rozpoczęło, więc prośba nie może być zatwierdzona.', 'error')
+        else:
+            c.execute(delete(poll_deletion_requests).where(poll_deletion_requests.c.poll_id==poll_id))
+            flash('Odrzucono prośbę o usunięcie.', 'success')
+    return redirect('/voting?tab=delete-requests')
+
+@app.post('/voting/polls/<int:poll_id>/end-early')
+@access('admin')
+def end_poll_early(poll_id):
+    with engine.begin() as c:
+        poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+        if not poll: abort(404)
+        if poll_state(poll)!='open': abort(400, 'Administrator może zakończyć tylko trwające głosowanie.')
+        c.execute(update(polls).where(polls.c.id==poll_id).values(ends_at=now().isoformat(timespec='seconds')))
+    flash('Zakończono głosowanie przed zaplanowanym terminem.', 'success')
+    return redirect('/voting?tab=results&poll_id='+str(poll_id))
+
+@app.post('/voting/polls/<int:poll_id>/publish-results')
+@access('guardian','admin')
+def publish_poll_results(poll_id):
+    publish=request.form.get('publish')
+    if publish not in ('1','0'): abort(400)
+    with engine.begin() as c:
+        poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+        if not poll: abort(404)
+        if poll_state(poll)!='closed': abort(400, 'Wyniki można opublikować dopiero po zakończeniu głosowania.')
+        c.execute(update(polls).where(polls.c.id==poll_id).values(results_public=int(publish)))
+    flash('Wyniki są teraz widoczne publicznie.' if publish=='1' else 'Wyniki przestały być widoczne publicznie.', 'success')
+    return redirect('/voting?tab=results&poll_id='+str(poll_id))
 
 @app.post('/voting/requests/<int:request_id>')
 @access('guardian','admin')
@@ -446,6 +700,13 @@ def public_voting():
             listed.append(dict(poll, state=state))
     return render_template('public_voting.html', polls=listed)
 
+@app.get('/public-results')
+def public_poll_results():
+    results=published_results()
+    selected_id=request.args.get('poll_id',type=int)
+    selected=next((item for item in results if item['poll']['id']==selected_id),None)
+    return render_template('public_results.html', results=results, selected=selected)
+
 @app.route('/public-voting/<int:poll_id>', methods=['GET','POST'])
 def public_vote(poll_id):
     found=rows(polls,polls.c.id==poll_id)
@@ -480,6 +741,8 @@ def request_external_voter_removal(voter_id):
     with engine.begin() as c:
         voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id).with_for_update()).mappings().first()
         if not voter or voter['kind']!='external': abort(404)
+        poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
+        if not poll or poll_state(poll)=='closed': abort(400, 'Po zakończeniu głosowania nie można usuwać danych głosujących.')
         if g.user['role'] in ('guardian','admin'):
             anonymize_external_voter(c,voter_id)
             c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
@@ -500,8 +763,14 @@ def decide_external_voter_removal(voter_id):
         pending=c.scalar(select(poll_voter_removals.c.voter_id).where(poll_voter_removals.c.voter_id==voter_id))
         if not voter or not pending: abort(404)
         c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
-        if decision=='approve': anonymize_external_voter(c,voter_id)
-    flash('Usunięto dane głosującego zewnętrznego i jego głos z wyników.' if decision=='approve' else 'Prośbę odrzucono; dane pozostają widoczne.', 'success' if decision=='approve' else 'error')
+        poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
+        if not poll or poll_state(poll)=='closed':
+            decision='closed'
+        elif decision=='approve': anonymize_external_voter(c,voter_id)
+    if decision=='closed':
+        flash('Głosowanie się zakończyło. Prośbę zamknięto bez usuwania danych.', 'error')
+    else:
+        flash('Usunięto dane głosującego zewnętrznego i jego głos z wyników.' if decision=='approve' else 'Prośbę odrzucono; dane pozostają widoczne.', 'success' if decision=='approve' else 'error')
     return redirect('/voting?tab=results&poll_id=' + str(voter['poll_id']))
 
 @app.route('/mail', methods=['GET','POST'])
