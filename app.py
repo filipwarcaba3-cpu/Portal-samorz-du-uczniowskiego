@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-app.config.update(MAX_CONTENT_LENGTH=25*1024*1024, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE') == '1')
+app.config.update(MAX_CONTENT_LENGTH=30*1024*1024, SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE') == '1')
 dburl = os.getenv('DATABASE_URL', 'sqlite:///portal.db')
 if dburl.startswith(('postgres://', 'postgresql://')):
     dburl = 'postgresql+psycopg://' + dburl.split('://', 1)[1]
@@ -29,13 +29,14 @@ rich_bodies = Table('message_formatting', meta, Column('message', Integer, prima
 external_ideas = Table('external_ideas', meta, Column('id', Integer, primary_key=True), Column('name', String(160)), Column('school_class', String(60)), Column('body', Text), Column('created', String(30)))
 idea_removals = Table('external_idea_removals', meta, Column('idea', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 vote_requests = Table('vote_requests', meta, Column('id', Integer, primary_key=True), Column('source_type', String(20), nullable=False), Column('source_id', Integer, nullable=False), Column('requester', Integer), Column('author_name', String(160)), Column('school_class', String(60)), Column('body', Text), Column('status', String(20), nullable=False, default='pending'), Column('poll_id', Integer), Column('created', String(30)), UniqueConstraint('source_type','source_id',name='uq_vote_request_source'))
-polls = Table('polls', meta, Column('id', Integer, primary_key=True), Column('title', String(200), nullable=False), Column('created_by', Integer), Column('created', String(30)), Column('starts_at', String(40)), Column('ends_at', String(40)), Column('results_public', Integer, nullable=False, default=0, server_default='0'))
+polls = Table('polls', meta, Column('id', Integer, primary_key=True), Column('title', String(200), nullable=False), Column('created_by', Integer), Column('created', String(30)), Column('starts_at', String(40)), Column('ends_at', String(40)), Column('results_public', Integer, nullable=False, default=0, server_default='0'), Column('archived', Integer, nullable=False, default=0, server_default='0'))
 poll_options = Table('poll_options', meta, Column('id', Integer, primary_key=True), Column('poll_id', Integer, nullable=False), Column('source_type', String(20)), Column('source_id', Integer), Column('author_name', String(160)), Column('school_class', String(60)), Column('body', Text, nullable=False), Column('created', String(30)))
 poll_voters = Table('poll_voters', meta, Column('id', BigInteger, primary_key=True), Column('poll_id', Integer, nullable=False), Column('kind', String(20), nullable=False), Column('internal_user', Integer), Column('external_key', String(64)), Column('ballot_key', String(64), unique=True), Column('display_name', String(160)), Column('school_class', String(60)), Column('created', String(30)), Column('anonymized', Integer, default=0), UniqueConstraint('poll_id','internal_user',name='uq_poll_internal_voter'), UniqueConstraint('poll_id','external_key',name='uq_poll_external_voter'))
 secret_ballots = Table('secret_ballots', meta, Column('id', BigInteger, primary_key=True), Column('ballot_key', String(64), unique=True, nullable=False), Column('poll_id', Integer, nullable=False), Column('option_id', Integer, nullable=False))
 poll_voter_removals = Table('poll_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)))
+announcement_images = Table('announcement_images', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False), Column('image_data', LargeBinary, nullable=False))
 portal_settings = Table('portal_settings', meta, Column('key', String(100), primary_key=True), Column('value', Text, nullable=False))
 meta.create_all(engine)
 if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
@@ -45,6 +46,14 @@ if 'results_public' not in {column['name'] for column in inspect(engine).get_col
     except Exception:
         # Multiple Render workers may try the one-time migration at startup.
         if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
+            raise
+if 'archived' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
+    try:
+        with engine.begin() as c:
+            c.exec_driver_sql("ALTER TABLE polls ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        # Multiple Render workers may try the one-time migration at startup.
+        if 'archived' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
             raise
 try:
     with engine.begin() as c:
@@ -196,7 +205,7 @@ def login_screen_values():
 
 def published_results():
     result = []
-    for poll in sorted(rows(polls, polls.c.results_public == 1), key=lambda p:p['id'], reverse=True):
+    for poll in sorted(rows(polls, (polls.c.results_public == 1) & (polls.c.archived == 0)), key=lambda p:p['id'], reverse=True):
         if poll_state(poll) != 'closed': continue
         options = rows(poll_options, poll_options.c.poll_id == poll['id'])
         ballots = rows(secret_ballots, secret_ballots.c.poll_id == poll['id'])
@@ -204,9 +213,18 @@ def published_results():
         result.append(dict(poll=poll, options=counts, total=sum(option['votes'] for option in counts)))
     return result
 
+def announcement_image_list(announcement):
+    images=[]
+    if announcement.get('has_legacy_image'):
+        images.append({'url':f"/login-announcements/{announcement['id']}/image"})
+    for image in sorted(rows(announcement_images, announcement_images.c.announcement_id==announcement['id']),key=lambda item:item['id']):
+        images.append({'url':f"/login-announcements/{announcement['id']}/images/{image['id']}"})
+    return images
+
 def render_login_page(**extra):
     with engine.connect() as c:
-        announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.image_data.is_not(None).label('has_image')).order_by(login_announcements.c.id.desc())).mappings()]
+        announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.id.desc())).mappings()]
+    for announcement in announcements: announcement['images']=announcement_image_list(announcement)
     values = dict(screen=login_screen_values(), announcements=announcements, public_results=published_results())
     values.update(extra)
     return render_template('login.html', **values)
@@ -326,18 +344,21 @@ def manage_login_screen():
             return redirect('/admin/login-screen')
     return render_template('login_screen_admin.html', screen=login_screen_values())
 
-def read_announcement_png():
-    upload=request.files.get('image')
-    if not upload or not upload.filename: return None
-    data=upload.stream.read(5*1024*1024+1)
-    if len(data)>5*1024*1024: raise ValueError('Obraz PNG może mieć maksymalnie 5 MB.')
-    if len(data)<24 or not data.startswith(b'\x89PNG\r\n\x1a\n') or data[12:16]!=b'IHDR':
-        raise ValueError('Załącznik musi być poprawnym obrazem PNG.')
-    width=int.from_bytes(data[16:20],'big')
-    height=int.from_bytes(data[20:24],'big')
-    if not width or not height or width*height>25_000_000:
-        raise ValueError('Obraz PNG ma nieprawidłowe lub zbyt duże wymiary.')
-    return data
+def read_announcement_pngs():
+    uploads=[upload for upload in request.files.getlist('images') if upload and upload.filename]
+    if len(uploads)>5: raise ValueError('Do jednego ogłoszenia można dodać maksymalnie 5 obrazów.')
+    images=[]
+    for upload in uploads:
+        data=upload.stream.read(5*1024*1024+1)
+        if len(data)>5*1024*1024: raise ValueError('Każdy obraz PNG może mieć maksymalnie 5 MB.')
+        if len(data)<24 or not data.startswith(b'\x89PNG\r\n\x1a\n') or data[12:16]!=b'IHDR':
+            raise ValueError('Wszystkie załączniki muszą być poprawnymi obrazami PNG.')
+        width=int.from_bytes(data[16:20],'big')
+        height=int.from_bytes(data[20:24],'big')
+        if not width or not height or width*height>25_000_000:
+            raise ValueError('Obraz PNG ma nieprawidłowe lub zbyt duże wymiary.')
+        images.append(data)
+    return images
 
 @app.route('/announcements', methods=['GET','POST'])
 @access('guardian','admin')
@@ -348,6 +369,7 @@ def manage_announcements():
             if action == 'delete':
                 announcement_id=int(request.form.get('announcement_id',''))
                 with engine.begin() as c:
+                    c.execute(delete(announcement_images).where(announcement_images.c.announcement_id==announcement_id))
                     removed=c.execute(delete(login_announcements).where(login_announcements.c.id==announcement_id))
                     if not removed.rowcount: abort(404)
                 flash('Usunięto ogłoszenie.', 'success')
@@ -355,31 +377,48 @@ def manage_announcements():
                 title=request.form.get('title','').strip()
                 body=request.form.get('body','').strip()
                 if not title or len(title)>160 or not body or len(body)>10000: raise ValueError('Wpisz tytuł (maks. 160 znaków) i treść (maks. 10 000 znaków).')
-                image=read_announcement_png()
+                images=read_announcement_pngs()
                 with engine.begin() as c:
                     if action=='create':
-                        c.execute(insert(login_announcements).values(title=title,body=body,image_data=image,created=now().isoformat(timespec='minutes')))
+                        announcement_id=c.execute(insert(login_announcements).values(title=title,body=body,created=now().isoformat(timespec='minutes'))).inserted_primary_key[0]
+                        for image in images:
+                            c.execute(insert(announcement_images).values(announcement_id=announcement_id,image_data=image))
                     else:
                         announcement_id=int(request.form.get('announcement_id',''))
                         record=c.execute(select(login_announcements).where(login_announcements.c.id==announcement_id).with_for_update()).mappings().first()
                         if not record: abort(404)
                         values={'title':title,'body':body}
-                        if request.form.get('remove_image')=='1': values['image_data']=None
-                        elif image is not None: values['image_data']=image
+                        remove_images=request.form.get('remove_images')=='1'
+                        current_count=0 if remove_images else (c.scalar(select(func.count()).select_from(announcement_images).where(announcement_images.c.announcement_id==announcement_id)) or 0) + (1 if record['image_data'] else 0)
+                        if remove_images: values['image_data']=None
+                        if current_count+len(images)>5: raise ValueError('Ogłoszenie może mieć maksymalnie 5 obrazów. Usuń obecne obrazy albo dodaj mniej plików.')
                         c.execute(update(login_announcements).where(login_announcements.c.id==announcement_id).values(**values))
+                        if remove_images: c.execute(delete(announcement_images).where(announcement_images.c.announcement_id==announcement_id))
+                        for image in images:
+                            c.execute(insert(announcement_images).values(announcement_id=announcement_id,image_data=image))
                 flash('Zapisano ogłoszenie.', 'success')
             else: abort(400)
         except ValueError as error:
             flash(str(error), 'error')
         return redirect('/announcements')
     with engine.connect() as c:
-        announcements=[dict(r) for r in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body,login_announcements.c.created,login_announcements.c.image_data.is_not(None).label('has_image')).order_by(login_announcements.c.id.desc())).mappings()]
+        announcements=[dict(r) for r in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body,login_announcements.c.created,login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.id.desc())).mappings()]
+    for announcement in announcements: announcement['images']=announcement_image_list(announcement)
     return render_template('announcements.html', announcements=announcements)
 
 @app.get('/login-announcements/<int:announcement_id>/image')
 def login_announcement_image(announcement_id):
     found=rows(login_announcements, login_announcements.c.id==announcement_id)
     if not found or not found[0]['image_data']: abort(404)
+    response=send_file(io.BytesIO(found[0]['image_data']),mimetype='image/png',as_attachment=False,conditional=False)
+    response.headers['Content-Disposition']='inline'
+    response.headers['Cache-Control']='no-store'
+    return response
+
+@app.get('/login-announcements/<int:announcement_id>/images/<int:image_id>')
+def login_announcement_extra_image(announcement_id, image_id):
+    found=rows(announcement_images, (announcement_images.c.id==image_id) & (announcement_images.c.announcement_id==announcement_id))
+    if not found: abort(404)
     response=send_file(io.BytesIO(found[0]['image_data']),mimetype='image/png',as_attachment=False,conditional=False)
     response.headers['Content-Disposition']='inline'
     response.headers['Cache-Control']='no-store'
@@ -449,7 +488,9 @@ def idea_box():
         if not body or len(body)>10000: abort(400)
         with engine.begin() as c: c.execute(insert(ideas).values(author=g.user['id'],body=body,created=now().strftime('%Y-%m-%dT%H:%M')))
         flash('Pomysł został opublikowany.'); return redirect('/ideas')
-    return render_template('ideas.html', entries=rows(ideas)[::-1], names={u['id']:u['name'] for u in rows(users)}, editing=None, external_entries=rows(external_ideas)[::-1], pending_removals={r['idea']:r for r in rows(idea_removals)}, vote_request_status={(r['source_type'],r['source_id']):r for r in rows(vote_requests)})
+    request_rows=rows(vote_requests)
+    approved_sources={(r['source_type'],r['source_id']) for r in request_rows if r['status']=='approved'}
+    return render_template('ideas.html', entries=[e for e in rows(ideas)[::-1] if ('internal',e['id']) not in approved_sources], names={u['id']:u['name'] for u in rows(users)}, editing=None, external_entries=[e for e in rows(external_ideas)[::-1] if ('external',e['id']) not in approved_sources], pending_removals={r['idea']:r for r in rows(idea_removals)}, vote_request_status={(r['source_type'],r['source_id']):r for r in request_rows})
 
 @app.route('/ideas/<int:iid>/edit', methods=['GET','POST'])
 @access()
@@ -504,7 +545,7 @@ def nominate_idea(source_type, item_id):
 
 def voting_page_data(tab, selected_id=None):
     people = {u['id']:u['name'] for u in rows(users)}
-    poll_rows = sorted(rows(polls), key=lambda p:p['id'], reverse=True)
+    poll_rows = sorted(rows(polls, polls.c.archived == 0), key=lambda p:p['id'], reverse=True)
     deletion_requests = rows(poll_deletion_requests)
     titles = {poll['id']:poll['title'] for poll in poll_rows}
     deletion_by_poll = {item['poll_id']:dict(item, requester_name=people.get(item['requester'],'Usunięte konto'),title=titles.get(item['poll_id'],'Głosowanie')) for item in deletion_requests}
@@ -539,7 +580,7 @@ def voting_page_data(tab, selected_id=None):
 def delete_unstarted_poll(c, poll_id):
     poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
     if not poll: abort(404)
-    if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można usuwać tylko głosowania, które jeszcze się nie rozpoczęły.')
+    if poll['archived'] or poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można usuwać tylko nie rozpoczęte głosowania.')
     options=[dict(r) for r in c.execute(select(poll_options).where(poll_options.c.poll_id==poll_id)).mappings()]
     for option in options:
         if option['source_type'] in ('internal','external') and option['source_id']:
@@ -583,7 +624,7 @@ def edit_unstarted_poll(poll_id):
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
-        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Nie można edytować głosowania, które już się rozpoczęło.')
+        if poll['archived'] or poll_state(poll) not in ('draft','scheduled'): abort(400, 'Nie można edytować głosowania, które już się rozpoczęło lub zostało usunięte.')
         if start and not c.scalar(select(func.count()).select_from(poll_options).where(poll_options.c.poll_id==poll_id)):
             flash('Dodaj co najmniej jeden pomysł przed ustawieniem dat głosowania.', 'error')
             return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
@@ -598,7 +639,7 @@ def remove_poll_option(poll_id, option_id):
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         option=c.execute(select(poll_options).where(poll_options.c.id==option_id,poll_options.c.poll_id==poll_id).with_for_update()).mappings().first()
         if not poll or not option: abort(404)
-        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Pomysł można usunąć tylko przed rozpoczęciem głosowania.')
+        if poll['archived'] or poll_state(poll) not in ('draft','scheduled'): abort(400, 'Pomysł można usunąć tylko przed rozpoczęciem głosowania.')
         if option['source_type'] in ('internal','external') and option['source_id']:
             c.execute(update(vote_requests).where(vote_requests.c.source_type==option['source_type'],vote_requests.c.source_id==option['source_id'],vote_requests.c.poll_id==poll_id).values(status='pending',poll_id=None))
         c.execute(delete(poll_options).where(poll_options.c.id==option_id))
@@ -612,11 +653,16 @@ def request_poll_deletion(poll_id):
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
-        if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można usuwać tylko głosowania, które jeszcze się nie rozpoczęły.')
         if g.user['role']=='admin':
-            delete_unstarted_poll(c,poll_id)
-            flash('Usunięto nie rozpoczęte głosowanie.', 'success')
+            if poll_state(poll) in ('draft','scheduled'):
+                delete_unstarted_poll(c,poll_id)
+                flash('Usunięto nie rozpoczęte głosowanie.', 'success')
+            else:
+                c.execute(update(polls).where(polls.c.id==poll_id).values(archived=1,results_public=0))
+                c.execute(delete(poll_deletion_requests).where(poll_deletion_requests.c.poll_id==poll_id))
+                flash('Usunięto głosowanie z portalu. Dane głosujących zostały zachowane.', 'success')
         else:
+            if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Można zgłaszać do usunięcia tylko głosowania, które jeszcze się nie rozpoczęły.')
             exists=c.scalar(select(poll_deletion_requests.c.poll_id).where(poll_deletion_requests.c.poll_id==poll_id))
             if exists: flash('Prośba o usunięcie tego głosowania już czeka na administratora.')
             else:
@@ -651,7 +697,7 @@ def end_poll_early(poll_id):
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
-        if poll_state(poll)!='open': abort(400, 'Administrator może zakończyć tylko trwające głosowanie.')
+        if poll['archived'] or poll_state(poll)!='open': abort(400, 'Administrator może zakończyć tylko trwające głosowanie.')
         c.execute(update(polls).where(polls.c.id==poll_id).values(ends_at=now().isoformat(timespec='seconds')))
     flash('Zakończono głosowanie przed zaplanowanym terminem.', 'success')
     return redirect('/voting?tab=results&poll_id='+str(poll_id))
@@ -664,7 +710,7 @@ def publish_poll_results(poll_id):
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
-        if poll_state(poll)!='closed': abort(400, 'Wyniki można opublikować dopiero po zakończeniu głosowania.')
+        if poll['archived'] or poll_state(poll)!='closed': abort(400, 'Wyniki można opublikować dopiero po zakończeniu głosowania.')
         c.execute(update(polls).where(polls.c.id==poll_id).values(results_public=int(publish)))
     flash('Wyniki są teraz widoczne publicznie.' if publish=='1' else 'Wyniki przestały być widoczne publicznie.', 'success')
     return redirect('/voting?tab=results&poll_id='+str(poll_id))
@@ -691,7 +737,7 @@ def decide_vote_request(request_id):
                 try: poll_id=int(poll_id)
                 except ValueError: abort(400)
                 target=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
-                if not target or poll_state(target)!='draft': abort(400)
+                if not target or target['archived'] or poll_state(target)!='draft': abort(400)
             c.execute(insert(poll_options).values(poll_id=poll_id,source_type=item['source_type'],source_id=item['source_id'],author_name=item['author_name'],school_class=item['school_class'],body=item['body'],created=now().isoformat(timespec='minutes')))
             c.execute(update(vote_requests).where(vote_requests.c.id==request_id).values(status='approved',poll_id=poll_id))
             flash('Pomysł dodano jako opcję głosowania. Głosowanie można uruchomić w zakładce „Utworzone głosowania”.', 'success')
@@ -708,7 +754,7 @@ def schedule_poll(poll_id):
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
-        if poll_state(poll)!='draft': abort(400)
+        if poll['archived'] or poll_state(poll)!='draft': abort(400)
         if not c.scalar(select(func.count()).select_from(poll_options).where(poll_options.c.poll_id==poll_id)):
             flash('Dodaj co najmniej jeden pomysł do tego głosowania przed jego uruchomieniem.')
             return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
@@ -720,7 +766,7 @@ def cast_ballot(poll_id, option_id, kind, display_name, school_class='', interna
     try:
         with engine.begin() as c:
             poll=c.execute(select(polls).where(polls.c.id==poll_id)).mappings().first()
-            if not poll or poll_state(poll)!='open':
+            if not poll or poll['archived'] or poll_state(poll)!='open':
                 return False, 'To głosowanie nie jest teraz otwarte.'
             option=c.scalar(select(poll_options.c.id).where(poll_options.c.id==option_id,poll_options.c.poll_id==poll_id))
             if not option: return False, 'Wybierz jedną z dostępnych propozycji.'
@@ -745,7 +791,7 @@ def cast_internal_vote(poll_id):
 @app.get('/public-voting')
 def public_voting():
     listed=[]
-    for poll in sorted(rows(polls),key=lambda p:p['id'],reverse=True):
+    for poll in sorted(rows(polls, polls.c.archived == 0),key=lambda p:p['id'],reverse=True):
         state=poll_state(poll)
         if state in ('scheduled','open'):
             listed.append(dict(poll, state=state))
@@ -760,7 +806,7 @@ def public_poll_results():
 
 @app.route('/public-voting/<int:poll_id>', methods=['GET','POST'])
 def public_vote(poll_id):
-    found=rows(polls,polls.c.id==poll_id)
+    found=rows(polls,(polls.c.id==poll_id) & (polls.c.archived==0))
     if not found or poll_state(found[0]) not in ('scheduled','open'): abort(404)
     poll=found[0]
     state=poll_state(poll)
@@ -793,7 +839,7 @@ def request_external_voter_removal(voter_id):
         voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id).with_for_update()).mappings().first()
         if not voter or voter['kind']!='external': abort(404)
         poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
-        if not poll or poll_state(poll)=='closed': abort(400, 'Po zakończeniu głosowania nie można usuwać danych głosujących.')
+        if not poll or poll['archived'] or poll_state(poll)=='closed': abort(400, 'Po zakończeniu lub usunięciu głosowania nie można usuwać danych głosujących.')
         if g.user['role'] in ('guardian','admin'):
             anonymize_external_voter(c,voter_id)
             c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
@@ -815,7 +861,7 @@ def decide_external_voter_removal(voter_id):
         if not voter or not pending: abort(404)
         c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
         poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
-        if not poll or poll_state(poll)=='closed':
+        if not poll or poll['archived'] or poll_state(poll)=='closed':
             decision='closed'
         elif decision=='approve': anonymize_external_voter(c,voter_id)
     if decision=='closed':
