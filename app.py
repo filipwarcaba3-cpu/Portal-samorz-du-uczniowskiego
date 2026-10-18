@@ -36,7 +36,8 @@ secret_ballots = Table('secret_ballots', meta, Column('id', BigInteger, primary_
 poll_voter_removals = Table('poll_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 poll_internal_voter_removals = Table('poll_internal_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
-login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)))
+login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)), Column('pinned', Integer, nullable=False, default=0, server_default='0'))
+participant_requests = Table('participant_creation_requests', meta, Column('id', Integer, primary_key=True), Column('name', String(160), nullable=False), Column('login', String(100), nullable=False), Column('password', Text), Column('position', String(60), nullable=False), Column('requester', Integer, nullable=False), Column('status', String(20), nullable=False, default='pending'), Column('created', String(30), nullable=False))
 announcement_images = Table('announcement_images', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False), Column('image_data', LargeBinary, nullable=False))
 login_screen_images = Table('login_screen_images', meta, Column('id', Integer, primary_key=True), Column('image_data', LargeBinary, nullable=False), Column('mime_type', String(40), nullable=False))
 chat_messages = Table('chat_messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer, nullable=False), Column('kind', String(20), nullable=False, default='text'), Column('body', Text, nullable=False, default=''), Column('created', String(30), nullable=False), Column('edited', Integer, nullable=False, default=0))
@@ -47,6 +48,13 @@ chat_poll_options = Table('chat_poll_options', meta, Column('id', Integer, prima
 chat_poll_votes = Table('chat_poll_votes', meta, Column('id', Integer, primary_key=True), Column('question_id', Integer, nullable=False), Column('option_id', Integer, nullable=False), Column('voter_id', Integer, nullable=False), UniqueConstraint('question_id','voter_id','option_id',name='uq_chat_vote_choice'))
 portal_settings = Table('portal_settings', meta, Column('key', String(100), primary_key=True), Column('value', Text, nullable=False))
 meta.create_all(engine)
+if 'pinned' not in {column['name'] for column in inspect(engine).get_columns('login_announcements')}:
+    try:
+        with engine.begin() as c:
+            c.exec_driver_sql("ALTER TABLE login_announcements ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        if 'pinned' not in {column['name'] for column in inspect(engine).get_columns('login_announcements')}:
+            raise
 if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
     try:
         with engine.begin() as c:
@@ -231,7 +239,7 @@ def announcement_image_list(announcement):
 
 def render_login_page(**extra):
     with engine.connect() as c:
-        announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.id.desc())).mappings()]
+        announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.pinned, login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.pinned.desc(), login_announcements.c.id.desc())).mappings()]
     for announcement in announcements: announcement['images']=announcement_image_list(announcement)
     values = dict(screen=login_screen_values(), announcements=announcements, public_results=published_results())
     values.update(extra)
@@ -256,7 +264,20 @@ def guard():
     if request.method == 'POST' and not session.get('csrf'): abort(400)
 
 @app.context_processor
-def context(): return dict(csrf=token, roles=ROLES, positions=POSITIONS, colors=COLORS)
+def context():
+    approvals={}
+    if g.user and g.user['role']=='admin':
+        with engine.connect() as c:
+            def count(table, condition=None):
+                query=select(func.count()).select_from(table)
+                if condition is not None: query=query.where(condition)
+                return c.scalar(query) or 0
+            approvals={
+                '/ideas': count(idea_removals),
+                '/voting': count(vote_requests, vote_requests.c.status=='pending') + count(poll_deletion_requests) + count(poll_voter_removals) + count(poll_internal_voter_removals),
+                '/users': count(participant_requests, participant_requests.c.status=='pending'),
+            }
+    return dict(csrf=token, roles=ROLES, positions=POSITIONS, colors=COLORS, approval_counts=approvals)
 
 @app.after_request
 def headers(response):
@@ -453,18 +474,19 @@ def manage_announcements():
             elif action in ('create','edit'):
                 title=request.form.get('title','').strip()
                 body=request.form.get('body','').strip()
+                pinned=int(request.form.get('pinned')=='1')
                 if not title or len(title)>160 or not body or len(body)>10000: raise ValueError('Wpisz tytuł (maks. 160 znaków) i treść (maks. 10 000 znaków).')
                 images=read_announcement_pngs()
                 with engine.begin() as c:
                     if action=='create':
-                        announcement_id=c.execute(insert(login_announcements).values(title=title,body=body,created=now().isoformat(timespec='minutes'))).inserted_primary_key[0]
+                        announcement_id=c.execute(insert(login_announcements).values(title=title,body=body,created=now().isoformat(timespec='minutes'),pinned=pinned)).inserted_primary_key[0]
                         for image in images:
                             c.execute(insert(announcement_images).values(announcement_id=announcement_id,image_data=image))
                     else:
                         announcement_id=int(request.form.get('announcement_id',''))
                         record=c.execute(select(login_announcements).where(login_announcements.c.id==announcement_id).with_for_update()).mappings().first()
                         if not record: abort(404)
-                        values={'title':title,'body':body}
+                        values={'title':title,'body':body,'pinned':pinned}
                         remove_images=request.form.get('remove_images')=='1'
                         current_count=0 if remove_images else (c.scalar(select(func.count()).select_from(announcement_images).where(announcement_images.c.announcement_id==announcement_id)) or 0) + (1 if record['image_data'] else 0)
                         if remove_images: values['image_data']=None
@@ -479,7 +501,7 @@ def manage_announcements():
             flash(str(error), 'error')
         return redirect('/announcements')
     with engine.connect() as c:
-        announcements=[dict(r) for r in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body,login_announcements.c.created,login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.id.desc())).mappings()]
+        announcements=[dict(r) for r in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body,login_announcements.c.created,login_announcements.c.pinned,login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.pinned.desc(),login_announcements.c.id.desc())).mappings()]
     for announcement in announcements: announcement['images']=announcement_image_list(announcement)
     return render_template('announcements.html', announcements=announcements)
 
@@ -1329,19 +1351,52 @@ def management():
     if request.path=='/users' and not isadmin: abort(403)
     if request.method=='POST':
         action=request.form.get('action')
-        if action=='create':
+        if action in ('approve_participant','reject_participant'):
+            if not isadmin: abort(403)
+            try: request_id=int(request.form.get('request_id',''))
+            except ValueError: abort(400)
+            try:
+                with engine.begin() as c:
+                    pending=c.execute(select(participant_requests).where(participant_requests.c.id==request_id,participant_requests.c.status=='pending').with_for_update()).mappings().first()
+                    if not pending: abort(404)
+                    if action=='reject_participant':
+                        c.execute(update(participant_requests).where(participant_requests.c.id==request_id).values(status='rejected',password=None))
+                        flash('Odrzucono prośbę o dodanie uczestnika.')
+                    else:
+                        duplicate=c.scalar(select(users.c.id).where(users.c.login==pending['login']).with_for_update())
+                        if duplicate:
+                            c.execute(update(participant_requests).where(participant_requests.c.id==request_id).values(status='rejected',password=None))
+                            flash('Nie można zatwierdzić prośby — ten login jest już zajęty. Opiekun musi wysłać nową prośbę z innym loginem.', 'error')
+                        else:
+                            c.execute(insert(users).values(name=pending['name'],login=pending['login'],password=pending['password'],role='student',position=pending['position'],suspended=0,color=COLORS[0],version=0,failures=0,locked_until=0))
+                            c.execute(update(participant_requests).where(participant_requests.c.id==request_id).values(status='approved',password=None))
+                            flash('Zatwierdzono dodanie uczestnika.', 'success')
+            except IntegrityError:
+                with engine.begin() as c:
+                    c.execute(update(participant_requests).where(participant_requests.c.id==request_id,participant_requests.c.status=='pending').values(status='rejected',password=None))
+                flash('Nie można zatwierdzić prośby — ten login jest już zajęty. Opiekun musi wysłać nową prośbę z innym loginem.', 'error')
+            return redirect('/users?tab=approvals')
+        elif action=='create':
             role=request.form.get('role','student') if isadmin else 'student'
             if role not in ROLES: abort(400)
             position=request.form.get('position','') if role=='student' else ''
             if role=='student' and position not in POSITIONS: abort(400)
             name=request.form.get('name','').strip(); login=request.form.get('login','').strip(); password=request.form.get('password','')
             if not name or not login or len(name)>160 or len(login)>100 or len(password)<4:
-                flash('Podaj imię i nazwisko, login i hasło co najmniej 4 znaki.'); return redirect(request.path)
+                flash('Podaj imię i nazwisko, login i hasło co najmniej 4 znaki.', 'error'); return redirect(request.path)
             from sqlalchemy.exc import IntegrityError
             try:
-                with engine.begin() as c: c.execute(insert(users).values(name=name,login=login,password=generate_password_hash(password),role=role,position=position,suspended=0,color=COLORS[0],version=0,failures=0,locked_until=0))
-                flash('Konto zostało dodane.')
-            except IntegrityError: flash('Ten login jest już zajęty.')
+                with engine.begin() as c:
+                    if not isadmin:
+                        active_login=c.scalar(select(users.c.id).where(users.c.login==login))
+                        pending_login=c.scalar(select(participant_requests.c.id).where(participant_requests.c.login==login,participant_requests.c.status=='pending'))
+                        if active_login or pending_login:
+                            flash('Ten login jest już używany albo czeka na zatwierdzenie.'); return redirect(request.path)
+                        c.execute(insert(participant_requests).values(name=name,login=login,password=generate_password_hash(password),position=position,requester=g.user['id'],status='pending',created=now().isoformat(timespec='minutes')))
+                    else:
+                        c.execute(insert(users).values(name=name,login=login,password=generate_password_hash(password),role=role,position=position,suspended=0,color=COLORS[0],version=0,failures=0,locked_until=0))
+                flash('Prośba o dodanie uczestnika czeka na zatwierdzenie administratora.' if not isadmin else 'Konto zostało dodane.', 'success')
+            except IntegrityError: flash('Ten login jest już zajęty albo zgłoszony.')
         else:
             try: uid=int(request.form.get('uid',''))
             except ValueError: abort(400)
@@ -1367,7 +1422,12 @@ def management():
             flash('Zmiany zapisane.')
         return redirect(request.path)
     people=rows(users) if request.path=='/users' else rows(users,users.c.role=='student')
-    return render_template('users.html',people=people,isadmin=isadmin)
+    pending_users=[]
+    if isadmin:
+        requester_names={u['id']:u['name'] for u in rows(users)}
+        pending_users=[dict(item,requester_name=requester_names.get(item['requester'],'Usunięte konto')) for item in rows(participant_requests,participant_requests.c.status=='pending')]
+        pending_users.sort(key=lambda item:item['created'] or '')
+    return render_template('users.html',people=people,isadmin=isadmin,pending_users=pending_users)
 
 @app.route('/profile',methods=['GET','POST'])
 @access()
