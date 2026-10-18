@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="screen-editor-heading"><div><h1>Zarządzaj ekranem logowania</h1><p class="subtitle">Przeciągaj elementy uchwytem, zmieniaj ich rozmiar w prawym dolnym rogu, a treść edytuj po kliknięciu.</p></div><button type="button" id="open-save">Zapisz zmiany</button></div>
+<div class="screen-editor-heading"><div><h1>Zarządzaj ekranem logowania</h1><p class="subtitle">Przeciągaj elementy uchwytem, zmieniaj ich rozmiar w prawym dolnym rogu, a treść edytuj po kliknięciu. Wysokość panelu ogłoszeń określa też rozmiar jego przewijanego pola na stronie logowania.</p></div><button type="button" id="open-save">Zapisz zmiany</button></div>
 <form method="post" id="screen-form" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf() }}">
   {% for key in ['info_title','info_body','ideas_title','ideas_body','voting_title','voting_body','results_title','results_body'] %}<input type="hidden" id="field-{{ key }}" name="{{ key }}" value="{{ screen[key] }}">{% endfor %}
   <input type="hidden" id="layout-json" name="layout" value="">

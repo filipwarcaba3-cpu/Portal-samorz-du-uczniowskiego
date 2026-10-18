@@ -1,1 +1,51 @@
-{% extends 'base.html' %}{% block content %}<h1>{{ 'Użytkownicy' if request.path=='/users' else 'Skład trójki' }}</h1><p class="subtitle">Zarządzaj kontami i dostępem do portalu.</p><section class="card"><h2>Dodaj konto</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="action" value="create"><div class="grid"><label>Imię i nazwisko<input name="name" required maxlength="160"></label><label>Login<input name="login" required maxlength="100" autocomplete="off"></label></div><label>Hasło początkowe<input type="password" name="password" required minlength="4" autocomplete="new-password"></label>{% if isadmin %}<label>Rodzaj konta<select name="role">{% for key,label in roles.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>{% endif %}<label>Funkcja ucznia (dotyczy konta uczestnika)<select name="position">{% for p in positions %}<option>{{ p }}</option>{% endfor %}</select></label><button>Dodaj użytkownika</button></form></section>{% for u in people %}<section class="card"><h2>{{ u.name }} {% if u.suspended %}<span class="badge red">Zawieszony</span>{% endif %}</h2><p>{{ u.login }} · {{ roles[u.role] }} {% if u.position %}· <span class="badge">{{ u.position }}</span>{% endif %}</p>{% if u.id != g.user.id %}<form class="inline" method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><button name="action" value="{{ 'resume' if u.suspended else 'suspend' }}" class="secondary">{{ 'Odwieś' if u.suspended else 'Zawieś' }}</button></form>{% if isadmin %}<details><summary>Zmień hasło</summary><form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><label>Nowe hasło<input type="password" name="password" required minlength="4" autocomplete="new-password"></label><button name="action" value="password">Zapisz nowe hasło</button></form></details><details><summary>Usuń konto</summary><p>Usunięcie konta jest trwałe. Wiadomości pozostaną u odbiorców.</p><form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><button name="action" value="delete" class="danger">Potwierdzam usunięcie konta</button></form></details>{% endif %}{% endif %}</section>{% else %}<p>Nie dodano jeszcze uczestników.</p>{% endfor %}{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>{{ 'Użytkownicy' if request.path=='/users' else 'Skład trójki' }}</h1>
+<p class="subtitle">Zarządzaj kontami i dostępem do portalu.</p>
+
+{% if isadmin %}
+<section class="card approval-list">
+  <h2>Prośby o dodanie uczestników {% if pending_users %}<span class="approval-count">{{ pending_users|length }}</span>{% endif %}</h2>
+  {% for item in pending_users %}
+  <article class="participant-request">
+    <div><strong>{{ item.name }}</strong><p>{{ item.login }} · {{ item.position }}</p><small>Prośba od {{ item.requester_name }} · {{ item.created|replace('T',' ') }}</small></div>
+    <div class="request-actions">
+      <form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="request_id" value="{{ item.id }}"><button name="action" value="approve_participant">Zatwierdź</button></form>
+      <form method="post" onsubmit="return confirm('Odrzucić prośbę o dodanie tego uczestnika?')"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="request_id" value="{{ item.id }}"><button class="danger" name="action" value="reject_participant">Odrzuć</button></form>
+    </div>
+  </article>
+  {% else %}<p class="muted-note">Nie ma próśb czekających na zatwierdzenie.</p>{% endfor %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Dodaj konto</h2>
+  {% if not isadmin %}<p class="approval-note">Opiekun może zgłosić wyłącznie nowego uczestnika. Konto zostanie utworzone dopiero po zatwierdzeniu przez administratora.</p>{% endif %}
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="action" value="create">
+    <div class="grid"><label>Imię i nazwisko<input name="name" required maxlength="160"></label><label>Login<input name="login" required maxlength="100" autocomplete="off"></label></div>
+    <label>Hasło początkowe<input type="password" name="password" required minlength="4" autocomplete="new-password"></label>
+    {% if isadmin %}<label>Rodzaj konta<select name="role">{% for key,label in roles.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>{% endif %}
+    <label>Funkcja uczestnika<select name="position">{% for p in positions %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></label>
+    <button>{{ 'Dodaj konto' if isadmin else 'Wyślij prośbę do administratora' }}</button>
+  </form>
+</section>
+
+<h2>{{ 'Wszystkie konta' if isadmin else 'Uczestnicy samorządu' }}</h2>
+{% for u in people %}
+<section class="card user-card">
+  <h2>{{ u.name }} {% if u.suspended %}<span class="badge red">Zawieszony</span>{% endif %}</h2>
+  <p>{{ u.login }} · {{ roles[u.role] }} {% if u.position %}· <span class="badge">{{ u.position }}</span>{% endif %}</p>
+  {% if u.id != g.user.id %}
+  <form class="inline" method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><button name="action" value="{{ 'resume' if u.suspended else 'suspend' }}" class="secondary">{{ 'Odwieś' if u.suspended else 'Zawieś' }}</button></form>
+  {% if isadmin %}
+  <details><summary>Zmień hasło</summary><form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><label>Nowe hasło<input type="password" name="password" required minlength="4" autocomplete="new-password"></label><button name="action" value="password">Zapisz nowe hasło</button></form></details>
+  <details><summary>Usuń konto</summary><p>Usunięcie konta jest trwałe. Wiadomości pozostaną u odbiorców.</p><form method="post"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="uid" value="{{ u.id }}"><button name="action" value="delete" class="danger">Potwierdzam usunięcie konta</button></form></details>
+  {% endif %}{% endif %}
+</section>
+{% else %}<p>Nie dodano jeszcze uczestników.</p>{% endfor %}
+<style>
+.approval-list{border:1px solid #f0c2c5}.approval-count{display:inline-grid;place-items:center;min-width:23px;height:23px;padding:0 6px;margin-left:6px;border-radius:50px;background:#e5252b;color:white;font-size:12px}.participant-request{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-top:1px solid #e8edf2}.participant-request p{margin:4px 0}.participant-request small{color:#71839e}.request-actions{display:flex;gap:8px;flex-wrap:wrap}.request-actions form{margin:0}.request-actions button{white-space:nowrap}.approval-note{padding:12px 14px;background:#fff7e6;border:1px solid #f0dcad;border-radius:10px;color:#70561e}.user-card details{margin-top:12px}.user-card details summary{cursor:pointer;color:#315675}
+@media(max-width:650px){.participant-request{align-items:flex-start;flex-direction:column}.request-actions{width:100%}.request-actions button{flex:1}}
+</style>
+{% endblock %}
