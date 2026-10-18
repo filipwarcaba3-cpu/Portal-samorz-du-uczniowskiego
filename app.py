@@ -1,4 +1,4 @@
-import os, secrets, io, time, hmac, hashlib, unicodedata, json
+import os, secrets, io, time, hmac, hashlib, unicodedata, json, mimetypes
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from functools import wraps
@@ -34,10 +34,17 @@ poll_options = Table('poll_options', meta, Column('id', Integer, primary_key=Tru
 poll_voters = Table('poll_voters', meta, Column('id', BigInteger, primary_key=True), Column('poll_id', Integer, nullable=False), Column('kind', String(20), nullable=False), Column('internal_user', Integer), Column('external_key', String(64)), Column('ballot_key', String(64), unique=True), Column('display_name', String(160)), Column('school_class', String(60)), Column('created', String(30)), Column('anonymized', Integer, default=0), UniqueConstraint('poll_id','internal_user',name='uq_poll_internal_voter'), UniqueConstraint('poll_id','external_key',name='uq_poll_external_voter'))
 secret_ballots = Table('secret_ballots', meta, Column('id', BigInteger, primary_key=True), Column('ballot_key', String(64), unique=True, nullable=False), Column('poll_id', Integer, nullable=False), Column('option_id', Integer, nullable=False))
 poll_voter_removals = Table('poll_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
+poll_internal_voter_removals = Table('poll_internal_voter_removals', meta, Column('voter_id', BigInteger, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)))
 announcement_images = Table('announcement_images', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False), Column('image_data', LargeBinary, nullable=False))
 login_screen_images = Table('login_screen_images', meta, Column('id', Integer, primary_key=True), Column('image_data', LargeBinary, nullable=False), Column('mime_type', String(40), nullable=False))
+chat_messages = Table('chat_messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer, nullable=False), Column('kind', String(20), nullable=False, default='text'), Column('body', Text, nullable=False, default=''), Column('created', String(30), nullable=False), Column('edited', Integer, nullable=False, default=0))
+chat_attachments = Table('chat_attachments', meta, Column('id', Integer, primary_key=True), Column('message_id', Integer, nullable=False), Column('name', String(255), nullable=False), Column('mime_type', String(100), nullable=False), Column('data', LargeBinary, nullable=False))
+chat_polls = Table('chat_polls', meta, Column('message_id', Integer, primary_key=True), Column('allow_multiple', Integer, nullable=False, default=0))
+chat_poll_questions = Table('chat_poll_questions', meta, Column('id', Integer, primary_key=True), Column('message_id', Integer, nullable=False), Column('position', Integer, nullable=False), Column('body', String(500), nullable=False))
+chat_poll_options = Table('chat_poll_options', meta, Column('id', Integer, primary_key=True), Column('question_id', Integer, nullable=False), Column('position', Integer, nullable=False), Column('body', String(200), nullable=False))
+chat_poll_votes = Table('chat_poll_votes', meta, Column('id', Integer, primary_key=True), Column('question_id', Integer, nullable=False), Column('option_id', Integer, nullable=False), Column('voter_id', Integer, nullable=False), UniqueConstraint('question_id','voter_id','option_id',name='uq_chat_vote_choice'))
 portal_settings = Table('portal_settings', meta, Column('key', String(100), primary_key=True), Column('value', Text, nullable=False))
 meta.create_all(engine)
 if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
@@ -654,6 +661,12 @@ def voting_page_data(tab, selected_id=None):
     finished = [p for p in enriched if p['state']=='closed']
     selected = next((p for p in enriched if p['id']==selected_id), None)
     detail = None
+    active_external_voters=[]
+    if selected and selected['state'] in ('scheduled','open'):
+        voter_rows=rows(poll_voters,poll_voters.c.poll_id==selected['id'])
+        removals={r['voter_id']:r for r in rows(poll_voter_removals)}
+        active_external_voters=[dict(v,removal=removals.get(v['id'])) for v in voter_rows if v['kind']=='external' and not v['anonymized']]
+        active_external_voters.sort(key=lambda v:v['display_name'] or '')
     if selected and selected['state']=='closed':
         voter_rows = rows(poll_voters, poll_voters.c.poll_id==selected['id'])
         ballots = rows(secret_ballots, secret_ballots.c.poll_id==selected['id'])
@@ -661,12 +674,36 @@ def voting_page_data(tab, selected_id=None):
         for option in selected['options']:
             options.append(dict(option, votes=sum(b['option_id']==option['id'] for b in ballots)))
         removals = {r['voter_id']:r for r in rows(poll_voter_removals)}
-        voters_internal = [v for v in voter_rows if v['kind']=='internal']
+        internal_removals={r['voter_id']:r for r in rows(poll_internal_voter_removals)}
+        user_roles={u['id']:u['role'] for u in rows(users)}
+        voters_internal = [dict(v,removal=internal_removals.get(v['id']),role=user_roles.get(v['internal_user'])) for v in voter_rows if v['kind']=='internal' and not v['anonymized']]
         voters_external = [dict(v, removal=removals.get(v['id'])) for v in voter_rows if v['kind']=='external' and not v['anonymized']]
         voters_internal.sort(key=lambda v:v['display_name'] or '')
         voters_external.sort(key=lambda v:v['display_name'] or '')
         detail = dict(poll=selected, options=options, internal_voters=voters_internal, external_voters=voters_external)
-    return dict(tab=tab, pending_requests=pending, all_polls=enriched, draft_polls=[p for p in enriched if p['state']=='draft'], active_polls=active, finished_polls=finished, selected_poll=selected, detail=detail, people=people, deletion_requests=[deletion_by_poll[p['id']] for p in enriched if p['id'] in deletion_by_poll])
+    external_voter_requests=[]
+    if g.user['role'] in ('guardian','admin'):
+        all_voters={v['id']:v for v in rows(poll_voters)}
+        all_poll_rows=rows(polls)
+        all_poll_titles={p['id']:p['title'] for p in all_poll_rows}
+        for item in rows(poll_voter_removals):
+            voter=all_voters.get(item['voter_id'])
+            poll_title=all_poll_titles.get(voter['poll_id']) if voter else None
+            if voter and voter['kind']=='external' and not voter['anonymized'] and poll_title:
+                external_voter_requests.append(dict(item,voter_name=voter['display_name'] or 'Głosujący zewnętrzny',school_class=voter['school_class'],poll_title=poll_title,poll_id=voter['poll_id'],requester_name=people.get(item['requester'],'Użytkownik')))
+        external_voter_requests.sort(key=lambda item:item['created'] or '',reverse=True)
+    internal_voter_requests=[]
+    if g.user['role']=='admin':
+        user_names={u['id']:u['name'] for u in rows(users)}
+        poll_titles={p['id']:p['title'] for p in poll_rows}
+        all_voters={v['id']:v for v in rows(poll_voters)}
+        for item in rows(poll_internal_voter_removals):
+            voter=all_voters.get(item['voter_id'])
+            if voter and (voter['kind']!='internal' or voter['anonymized']): voter=None
+            if voter:
+                internal_voter_requests.append(dict(item,voter_name=voter['display_name'] or 'Uczestnik',requester_name=user_names.get(item['requester'],'Usunięte konto'),poll_title=poll_titles.get(voter['poll_id'],'Głosowanie'),poll_id=voter['poll_id']))
+    internal_voter_requests.sort(key=lambda item:item['created'] or '',reverse=True)
+    return dict(tab=tab, pending_requests=pending, all_polls=enriched, draft_polls=[p for p in enriched if p['state']=='draft'], active_polls=active, finished_polls=finished, selected_poll=selected, detail=detail, active_external_voters=active_external_voters, people=people, deletion_requests=[deletion_by_poll[p['id']] for p in enriched if p['id'] in deletion_by_poll], internal_voter_requests=internal_voter_requests, external_voter_requests=external_voter_requests)
 
 def delete_unstarted_poll(c, poll_id):
     poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
@@ -678,6 +715,7 @@ def delete_unstarted_poll(c, poll_id):
             c.execute(update(vote_requests).where(vote_requests.c.source_type==option['source_type'],vote_requests.c.source_id==option['source_id'],vote_requests.c.poll_id==poll_id).values(status='pending',poll_id=None))
     voter_ids=[r['id'] for r in c.execute(select(poll_voters.c.id).where(poll_voters.c.poll_id==poll_id)).mappings()]
     if voter_ids: c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id.in_(voter_ids)))
+    if voter_ids: c.execute(delete(poll_internal_voter_removals).where(poll_internal_voter_removals.c.voter_id.in_(voter_ids)))
     c.execute(delete(secret_ballots).where(secret_ballots.c.poll_id==poll_id))
     c.execute(delete(poll_voters).where(poll_voters.c.poll_id==poll_id))
     c.execute(delete(poll_options).where(poll_options.c.poll_id==poll_id))
@@ -688,8 +726,9 @@ def delete_unstarted_poll(c, poll_id):
 @access()
 def voting():
     tab = request.args.get('tab','pending')
-    if tab not in ('pending','created','results','delete-requests'): tab='pending'
+    if tab not in ('pending','created','results','delete-requests','vote-removals'): tab='pending'
     if tab=='delete-requests' and g.user['role']!='admin': abort(403)
+    if tab=='vote-removals' and g.user['role'] not in ('guardian','admin'): abort(403)
     selected_id = request.args.get('poll_id', type=int)
     return render_template('voting.html', **voting_page_data(tab, selected_id))
 
@@ -929,16 +968,16 @@ def anonymize_external_voter(c, voter_id):
     if not voter: return
     if voter['ballot_key']:
         c.execute(delete(secret_ballots).where(secret_ballots.c.ballot_key==voter['ballot_key']))
-    c.execute(update(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='external').values(ballot_key=None,display_name=None,school_class=None,anonymized=1))
+    c.execute(update(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='external').values(ballot_key=None,external_key=None,display_name=None,school_class=None,anonymized=1))
 
 @app.post('/voting/external-voters/<int:voter_id>/remove')
 @access('student','guardian','admin')
 def request_external_voter_removal(voter_id):
     with engine.begin() as c:
         voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id).with_for_update()).mappings().first()
-        if not voter or voter['kind']!='external': abort(404)
+        if not voter or voter['kind']!='external' or voter['anonymized']: abort(404)
         poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
-        if not poll or poll['archived'] or poll_state(poll)=='closed': abort(400, 'Po zakończeniu lub usunięciu głosowania nie można usuwać danych głosujących.')
+        if not poll: abort(404)
         if g.user['role'] in ('guardian','admin'):
             anonymize_external_voter(c,voter_id)
             c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
@@ -957,17 +996,57 @@ def decide_external_voter_removal(voter_id):
     with engine.begin() as c:
         voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='external').with_for_update()).mappings().first()
         pending=c.scalar(select(poll_voter_removals.c.voter_id).where(poll_voter_removals.c.voter_id==voter_id))
-        if not voter or not pending: abort(404)
-        c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
+        if not voter or voter['anonymized'] or not pending: abort(404)
         poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
-        if not poll or poll['archived'] or poll_state(poll)=='closed':
-            decision='closed'
-        elif decision=='approve': anonymize_external_voter(c,voter_id)
-    if decision=='closed':
-        flash('Głosowanie się zakończyło. Prośbę zamknięto bez usuwania danych.', 'error')
-    else:
-        flash('Usunięto dane głosującego zewnętrznego i jego głos z wyników.' if decision=='approve' else 'Prośbę odrzucono; dane pozostają widoczne.', 'success' if decision=='approve' else 'error')
+        if not poll: abort(404)
+        c.execute(delete(poll_voter_removals).where(poll_voter_removals.c.voter_id==voter_id))
+        if decision=='approve': anonymize_external_voter(c,voter_id)
+    flash('Usunięto dane głosującego zewnętrznego i jego głos z wyników.' if decision=='approve' else 'Prośbę odrzucono; dane pozostają widoczne.', 'success' if decision=='approve' else 'error')
     return redirect('/voting?tab=results&poll_id=' + str(voter['poll_id']))
+
+def anonymize_internal_voter(c, voter_id):
+    voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='internal').with_for_update()).mappings().first()
+    if not voter: return
+    if voter['ballot_key']:
+        c.execute(delete(secret_ballots).where(secret_ballots.c.ballot_key==voter['ballot_key']))
+    c.execute(update(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='internal').values(ballot_key=None,internal_user=None,display_name=None,school_class=None,anonymized=1))
+
+@app.post('/voting/internal-voters/<int:voter_id>/remove')
+@access('student','guardian','admin')
+def request_internal_voter_removal(voter_id):
+    with engine.begin() as c:
+        voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='internal').with_for_update()).mappings().first()
+        if not voter or voter['anonymized']: abort(404)
+        if g.user['role']=='student' and voter['internal_user']!=g.user['id']: abort(403)
+        poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
+        if not poll or poll_state(poll)!='closed': abort(400,'Dane i głosy uczestników można usuwać po zakończeniu głosowania.')
+        if g.user['role']=='admin':
+            anonymize_internal_voter(c,voter_id)
+            c.execute(delete(poll_internal_voter_removals).where(poll_internal_voter_removals.c.voter_id==voter_id))
+            flash('Usunięto głos i dane uczestnika.','success')
+        else:
+            exists=c.scalar(select(poll_internal_voter_removals.c.voter_id).where(poll_internal_voter_removals.c.voter_id==voter_id))
+            if exists: flash('Prośba o usunięcie już czeka na administratora.')
+            else:
+                c.execute(insert(poll_internal_voter_removals).values(voter_id=voter_id,requester=g.user['id'],created=now().isoformat(timespec='minutes')))
+                flash('Prośba o usunięcie głosu i danych została wysłana do administratora.','success')
+    return redirect('/voting?tab=results&poll_id='+str(voter['poll_id']))
+
+@app.post('/voting/internal-voters/<int:voter_id>/decision')
+@access('admin')
+def decide_internal_voter_removal(voter_id):
+    decision=request.form.get('decision')
+    if decision not in ('approve','reject'): abort(400)
+    with engine.begin() as c:
+        pending=c.execute(select(poll_internal_voter_removals).where(poll_internal_voter_removals.c.voter_id==voter_id).with_for_update()).mappings().first()
+        voter=c.execute(select(poll_voters).where(poll_voters.c.id==voter_id,poll_voters.c.kind=='internal').with_for_update()).mappings().first()
+        if not pending or not voter: abort(404)
+        poll=c.execute(select(polls).where(polls.c.id==voter['poll_id']).with_for_update()).mappings().first()
+        if not poll or poll_state(poll)!='closed': abort(400,'Usuwanie danych jest dostępne po zakończeniu głosowania.')
+        if decision=='approve': anonymize_internal_voter(c,voter_id)
+        c.execute(delete(poll_internal_voter_removals).where(poll_internal_voter_removals.c.voter_id==voter_id))
+    flash('Usunięto głos i dane uczestnika.' if decision=='approve' else 'Odrzucono prośbę; dane i głos pozostają.','success' if decision=='approve' else 'error')
+    return redirect('/voting?tab=delete-requests')
 
 @app.route('/mail', methods=['GET','POST'])
 @access()
@@ -1019,6 +1098,228 @@ def attachment(fid):
     f=found[0]; m=rows(messages,messages.c.id==f['message'])
     if not m or not can_read_message(m[0]): abort(403)
     return send_file(io.BytesIO(f['data']),download_name=f['name'],as_attachment=True,mimetype='application/octet-stream')
+
+def read_chat_uploads():
+    uploads=[item for item in request.files.getlist('attachments') if item and item.filename]
+    voice=request.files.get('voice_message')
+    if voice and voice.filename: uploads.append(voice)
+    if len(uploads)>10: abort(400,'W jednej wiadomości można wysłać maksymalnie 10 plików.')
+    result=[]
+    total=0
+    for upload in uploads:
+        data=upload.read(25*1024*1024+1)
+        total+=len(data)
+        if total>25*1024*1024: abort(400,'Załączniki w jednej wiadomości mogą mieć łącznie maksymalnie 25 MB.')
+        if not data: continue
+        name=upload.filename.replace('\\','/').split('/')[-1][:255] or 'zalacznik'
+        mime=(upload.mimetype or mimetypes.guess_type(name)[0] or 'application/octet-stream').lower()
+        result.append(dict(name=name,mime_type=mime,data=data))
+    return result
+
+@app.route('/chat',methods=['GET','POST'])
+@access()
+def chat():
+    if request.method=='POST':
+        kind=request.form.get('kind','text')
+        if kind not in ('text','media','poll','event','contact'): abort(400)
+        body=request.form.get('body','').strip()
+        if len(body)>5000: abort(400,'Wiadomość może mieć maksymalnie 5000 znaków.')
+        uploads=read_chat_uploads()
+        poll_data=None
+        event_data=None
+        contact_data=None
+        if kind=='poll':
+            try: poll_data=json.loads(request.form.get('poll_payload','{}'))
+            except (TypeError,ValueError): abort(400,'Ankieta ma nieprawidłowy format.')
+            questions=poll_data.get('questions') if isinstance(poll_data,dict) else None
+            if not isinstance(questions,list) or not 1<=len(questions)<=10: abort(400,'Ankieta musi mieć od 1 do 10 pytań.')
+            cleaned=[]
+            for question in questions:
+                if not isinstance(question,dict): abort(400,'Sprawdź treść pytań w ankiecie.')
+                question_body=' '.join(str(question.get('body','')).split())
+                options=question.get('options')
+                if not question_body or len(question_body)>500 or not isinstance(options,list) or not 2<=len(options)<=8: abort(400,'Każde pytanie musi mieć treść oraz co najmniej dwie odpowiedzi.')
+                option_values=[' '.join(str(option).split()) for option in options]
+                if any(not option or len(option)>200 for option in option_values) or len(set(option.lower() for option in option_values))!=len(option_values): abort(400,'Uzupełnij różne odpowiedzi do każdego pytania.')
+                cleaned.append(dict(body=question_body,options=option_values))
+            poll_data=dict(questions=cleaned,allow_multiple=int(bool(poll_data.get('allow_multiple'))))
+            if uploads: abort(400,'Do ankiety nie można dołączyć plików.')
+        elif kind=='event':
+            event_title=' '.join(request.form.get('event_title','').split())
+            event_date=request.form.get('event_date','').strip()
+            event_time=request.form.get('event_time','').strip()
+            event_place=' '.join(request.form.get('event_place','').split())
+            if not event_title or len(event_title)>160 or not event_date or len(event_place)>160: abort(400,'Uzupełnij nazwę, datę i miejsce wydarzenia.')
+            try: datetime.strptime(event_date,'%Y-%m-%d')
+            except ValueError: abort(400,'Podaj prawidłową datę wydarzenia.')
+            if event_time:
+                try: datetime.strptime(event_time,'%H:%M')
+                except ValueError: abort(400,'Podaj prawidłową godzinę wydarzenia.')
+            event_data=dict(title=event_title,date=event_date,time=event_time,place=event_place,caption=body)
+            if uploads: abort(400,'Do wydarzenia nie można dołączyć plików.')
+        elif kind=='contact':
+            try: contact_id=int(request.form.get('contact_user_id',''))
+            except ValueError: abort(400,'Wybierz osobę do udostępnienia.')
+            contact=rows(users,users.c.id==contact_id)
+            if not contact: abort(400,'Wybrane konto już nie istnieje.')
+            contact_data=dict(user_id=contact_id,name=contact[0]['name'],role=ROLES.get(contact[0]['role'],'Użytkownik'),caption=body)
+            if uploads: abort(400)
+        elif kind=='text' and uploads:
+            kind='media'
+        if kind in ('text','media') and not body and not uploads: abort(400,'Wpisz wiadomość albo dodaj załącznik.')
+        if kind=='event': body=json.dumps(event_data,ensure_ascii=False)
+        elif kind=='contact': body=json.dumps(contact_data,ensure_ascii=False)
+        with engine.begin() as c:
+            message_id=c.execute(insert(chat_messages).values(sender=g.user['id'],kind=kind,body=body,created=now().isoformat(timespec='minutes'),edited=0)).inserted_primary_key[0]
+            for file in uploads:
+                c.execute(insert(chat_attachments).values(message_id=message_id,**file))
+            if poll_data:
+                c.execute(insert(chat_polls).values(message_id=message_id,allow_multiple=poll_data['allow_multiple']))
+                for position,question in enumerate(poll_data['questions']):
+                    question_id=c.execute(insert(chat_poll_questions).values(message_id=message_id,position=position,body=question['body'])).inserted_primary_key[0]
+                    c.execute(insert(chat_poll_options),[dict(question_id=question_id,position=index,body=option) for index,option in enumerate(question['options'])])
+        return redirect('/chat#message-'+str(message_id))
+
+    with engine.connect() as c:
+        message_rows=[dict(item) for item in c.execute(select(chat_messages).order_by(chat_messages.c.id.desc()).limit(120)).mappings()]
+        message_rows.reverse()
+        message_ids=[item['id'] for item in message_rows]
+        attachment_rows=[dict(item) for item in c.execute(select(chat_attachments.c.id,chat_attachments.c.message_id,chat_attachments.c.name,chat_attachments.c.mime_type).where(chat_attachments.c.message_id.in_(message_ids))).mappings()] if message_ids else []
+        poll_message_ids=[item['id'] for item in message_rows if item['kind']=='poll']
+        poll_settings=[dict(item) for item in c.execute(select(chat_polls).where(chat_polls.c.message_id.in_(poll_message_ids))).mappings()] if poll_message_ids else []
+        poll_questions=[dict(item) for item in c.execute(select(chat_poll_questions).where(chat_poll_questions.c.message_id.in_(poll_message_ids)).order_by(chat_poll_questions.c.position)).mappings()] if poll_message_ids else []
+        question_ids=[item['id'] for item in poll_questions]
+        poll_options_rows=[dict(item) for item in c.execute(select(chat_poll_options).where(chat_poll_options.c.question_id.in_(question_ids)).order_by(chat_poll_options.c.position)).mappings()] if question_ids else []
+        poll_vote_rows=[dict(item) for item in c.execute(select(chat_poll_votes).where(chat_poll_votes.c.question_id.in_(question_ids))).mappings()] if question_ids else []
+    attachments_by_message={}
+    for item in attachment_rows: attachments_by_message.setdefault(item['message_id'],[]).append(item)
+    settings_by_message={item['message_id']:item for item in poll_settings}
+    questions_by_message={}
+    for item in poll_questions: questions_by_message.setdefault(item['message_id'],[]).append(item)
+    options_by_question={}
+    for item in poll_options_rows: options_by_question.setdefault(item['question_id'],[]).append(item)
+    votes_by_question={}
+    for item in poll_vote_rows: votes_by_question.setdefault(item['question_id'],[]).append(item)
+    users_by_id={item['id']:dict(item) for item in rows(users)}
+    for message in message_rows:
+        sender=users_by_id.get(message['sender'])
+        message['sender_name']=sender['name'] if sender else 'Usunięte konto'
+        message['sender_role']=ROLES.get(sender['role'],'Użytkownik') if sender else 'Użytkownik'
+        message['own']=message['sender']==g.user['id']
+        message['attachments']=attachments_by_message.get(message['id'],[])
+        message['event_data']=None
+        message['contact_data']=None
+        message['edit_body']=message['body']
+        message['poll_data']=None
+        if message['kind']=='event':
+            try: message['event_data']=json.loads(message['body'])
+            except (TypeError,ValueError): message['event_data']={}
+            message['edit_body']=message['event_data'].get('caption','')
+        elif message['kind']=='contact':
+            try: message['contact_data']=json.loads(message['body'])
+            except (TypeError,ValueError): message['contact_data']={}
+            message['edit_body']=message['contact_data'].get('caption','')
+        elif message['kind']=='poll':
+            settings=settings_by_message.get(message['id'])
+            questions=questions_by_message.get(message['id'],[])
+            poll_questions=[]
+            for question in questions:
+                options=options_by_question.get(question['id'],[])
+                question_votes=votes_by_question.get(question['id'],[])
+                selected_options={vote['option_id'] for vote in question_votes if vote['voter_id']==g.user['id']}
+                poll_questions.append(dict(question,options=[dict(option,votes=sum(vote['option_id']==option['id'] for vote in question_votes),selected=option['id'] in selected_options) for option in options],total=len(question_votes)))
+            message['poll_data']=dict(allow_multiple=bool(settings and settings['allow_multiple']),questions=poll_questions)
+    contacts=sorted((dict(id=item['id'],name=item['name'],role=item['role']) for item in users_by_id.values()),key=lambda item:item['name'].lower())
+    return render_template('chat.html',messages=message_rows,contacts=contacts)
+
+@app.post('/chat/<int:message_id>/edit')
+@access()
+def edit_chat_message(message_id):
+    message=rows(chat_messages,chat_messages.c.id==message_id)
+    if not message: abort(404)
+    if message[0]['sender']!=g.user['id']: abort(403)
+    body=request.form.get('body','').strip()
+    if len(body)>5000: abort(400)
+    if message[0]['kind']=='text' and not body: abort(400,'Wiadomość tekstowa nie może być pusta.')
+    if message[0]['kind']=='event':
+        try: payload=json.loads(message[0]['body'])
+        except (TypeError,ValueError): abort(400)
+        title=' '.join(request.form.get('event_title','').split())
+        event_date=request.form.get('event_date','').strip()
+        event_time=request.form.get('event_time','').strip()
+        place=' '.join(request.form.get('event_place','').split())
+        if not title or len(title)>160 or not event_date or len(place)>160: abort(400,'Uzupełnij nazwę, datę i miejsce wydarzenia.')
+        try: datetime.strptime(event_date,'%Y-%m-%d')
+        except ValueError: abort(400,'Podaj prawidłową datę wydarzenia.')
+        if event_time:
+            try: datetime.strptime(event_time,'%H:%M')
+            except ValueError: abort(400,'Podaj prawidłową godzinę wydarzenia.')
+        payload.update(title=title,date=event_date,time=event_time,place=place,caption=body)
+        body=json.dumps(payload,ensure_ascii=False)
+    elif message[0]['kind']=='contact':
+        try: payload=json.loads(message[0]['body'])
+        except (TypeError,ValueError): abort(400)
+        try: contact_id=int(request.form.get('contact_user_id',''))
+        except ValueError: abort(400,'Wybierz osobę do udostępnienia.')
+        contact=rows(users,users.c.id==contact_id)
+        if not contact: abort(400,'Wybrane konto już nie istnieje.')
+        payload.update(user_id=contact_id,name=contact[0]['name'],role=ROLES.get(contact[0]['role'],'Użytkownik'),caption=body)
+        body=json.dumps(payload,ensure_ascii=False)
+    with engine.begin() as c:
+        c.execute(update(chat_messages).where(chat_messages.c.id==message_id,chat_messages.c.sender==g.user['id']).values(body=body,edited=1))
+    flash('Zmieniono własną wiadomość.','success')
+    return redirect('/chat#message-'+str(message_id))
+
+@app.post('/chat/<int:message_id>/delete')
+@access()
+def delete_chat_message(message_id):
+    with engine.begin() as c:
+        message=c.execute(select(chat_messages).where(chat_messages.c.id==message_id).with_for_update()).mappings().first()
+        if not message: abort(404)
+        if message['sender']!=g.user['id']: abort(403)
+        question_ids=[item['id'] for item in c.execute(select(chat_poll_questions.c.id).where(chat_poll_questions.c.message_id==message_id)).mappings()]
+        if question_ids:
+            option_ids=[item['id'] for item in c.execute(select(chat_poll_options.c.id).where(chat_poll_options.c.question_id.in_(question_ids))).mappings()]
+            c.execute(delete(chat_poll_votes).where(chat_poll_votes.c.question_id.in_(question_ids)))
+            if option_ids: c.execute(delete(chat_poll_options).where(chat_poll_options.c.id.in_(option_ids)))
+            c.execute(delete(chat_poll_questions).where(chat_poll_questions.c.id.in_(question_ids)))
+        c.execute(delete(chat_polls).where(chat_polls.c.message_id==message_id))
+        c.execute(delete(chat_attachments).where(chat_attachments.c.message_id==message_id))
+        c.execute(delete(chat_messages).where(chat_messages.c.id==message_id,chat_messages.c.sender==g.user['id']))
+    flash('Usunięto własną wiadomość.','success')
+    return redirect('/chat')
+
+@app.post('/chat/polls/<int:message_id>/questions/<int:question_id>/vote')
+@access()
+def vote_in_chat_poll(message_id,question_id):
+    try: option_ids=list(dict.fromkeys(int(value) for value in request.form.getlist('option_id')))
+    except ValueError: abort(400)
+    with engine.begin() as c:
+        poll=c.execute(select(chat_polls).where(chat_polls.c.message_id==message_id).with_for_update()).mappings().first()
+        question=c.execute(select(chat_poll_questions).where(chat_poll_questions.c.id==question_id,chat_poll_questions.c.message_id==message_id)).mappings().first()
+        if not poll or not question or not option_ids: abort(400,'Wybierz co najmniej jedną odpowiedź.')
+        if not poll['allow_multiple'] and len(option_ids)>1: abort(400,'Wybierz jedną odpowiedź.')
+        valid={item['id'] for item in c.execute(select(chat_poll_options.c.id).where(chat_poll_options.c.question_id==question_id)).mappings()}
+        if any(option_id not in valid for option_id in option_ids): abort(400)
+        c.execute(delete(chat_poll_votes).where(chat_poll_votes.c.question_id==question_id,chat_poll_votes.c.voter_id==g.user['id']))
+        c.execute(insert(chat_poll_votes),[dict(question_id=question_id,option_id=option_id,voter_id=g.user['id']) for option_id in option_ids])
+    return redirect('/chat#message-'+str(message_id))
+
+@app.get('/chat/files/<int:file_id>')
+@access()
+def chat_file(file_id):
+    found=rows(chat_attachments,chat_attachments.c.id==file_id)
+    if not found: abort(404)
+    file=found[0]
+    message=rows(chat_messages,chat_messages.c.id==file['message_id'])
+    if not message: abort(404)
+    inline_types={'image/jpeg','image/png','image/gif','image/webp','audio/mpeg','audio/ogg','audio/wav','audio/webm','audio/mp4','video/mp4','video/webm','video/ogg'}
+    inline=file['mime_type'] in inline_types
+    response=send_file(io.BytesIO(file['data']),download_name=file['name'],mimetype=file['mime_type'] if inline else 'application/octet-stream',as_attachment=not inline,conditional=False)
+    if inline:
+        response.headers['Content-Security-Policy']="default-src 'none'; img-src 'self'; media-src 'self'; sandbox"
+        response.headers['Content-Disposition']='inline'
+    return response
 
 @app.route('/users', methods=['GET','POST'])
 @app.route('/team', methods=['GET','POST'])
