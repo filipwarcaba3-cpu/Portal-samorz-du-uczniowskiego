@@ -39,6 +39,7 @@ poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id',
 login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)), Column('pinned', Integer, nullable=False, default=0, server_default='0'))
 participant_requests = Table('participant_creation_requests', meta, Column('id', Integer, primary_key=True), Column('name', String(160), nullable=False), Column('login', String(100), nullable=False), Column('password', Text), Column('position', String(60), nullable=False), Column('requester', Integer, nullable=False), Column('status', String(20), nullable=False, default='pending'), Column('created', String(30), nullable=False))
 announcement_images = Table('announcement_images', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False), Column('image_data', LargeBinary, nullable=False))
+login_announcement_fields = Table('login_announcement_fields', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False, unique=True), Column('position', Integer, nullable=False, default=0))
 login_screen_images = Table('login_screen_images', meta, Column('id', Integer, primary_key=True), Column('image_data', LargeBinary, nullable=False), Column('mime_type', String(40), nullable=False))
 chat_messages = Table('chat_messages', meta, Column('id', Integer, primary_key=True), Column('sender', Integer, nullable=False), Column('kind', String(20), nullable=False, default='text'), Column('body', Text, nullable=False, default=''), Column('created', String(30), nullable=False), Column('edited', Integer, nullable=False, default=0))
 chat_attachments = Table('chat_attachments', meta, Column('id', Integer, primary_key=True), Column('message_id', Integer, nullable=False), Column('name', String(255), nullable=False), Column('mime_type', String(100), nullable=False), Column('data', LargeBinary, nullable=False))
@@ -237,11 +238,39 @@ def announcement_image_list(announcement):
         images.append({'url':f"/login-announcements/{announcement['id']}/images/{image['id']}"})
     return images
 
+def login_announcement_field_values():
+    with engine.connect() as c:
+        announcements = {item['id']: dict(item) for item in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.pinned, login_announcements.c.image_data.is_not(None).label('has_legacy_image'))).mappings()}
+    fields = sorted(rows(login_announcement_fields), key=lambda item: (item['position'], item['id']))
+    result=[]
+    for field in fields:
+        announcement=announcements.get(field['announcement_id'])
+        if not announcement: continue
+        announcement['images']=announcement_image_list(announcement)
+        result.append(dict(field, announcement=announcement))
+    return result
+
+def login_screen_admin_context(screen=None):
+    fields=login_announcement_field_values()
+    assigned={field['announcement_id'] for field in fields}
+    with engine.connect() as c:
+        available=[dict(item) for item in c.execute(select(login_announcements.c.id,login_announcements.c.title,login_announcements.c.body).order_by(login_announcements.c.pinned.desc(),login_announcements.c.id.desc())).mappings()]
+    return {
+        'screen': screen or login_screen_values(),
+        'announcement_fields': fields,
+        'available_announcements': available,
+        'unassigned_announcements': [announcement for announcement in available if announcement['id'] not in assigned],
+        'assigned_announcement_ids': assigned,
+    }
+
 def render_login_page(**extra):
     with engine.connect() as c:
         announcements = [dict(r) for r in c.execute(select(login_announcements.c.id, login_announcements.c.title, login_announcements.c.body, login_announcements.c.created, login_announcements.c.pinned, login_announcements.c.image_data.is_not(None).label('has_legacy_image')).order_by(login_announcements.c.pinned.desc(), login_announcements.c.id.desc())).mappings()]
+    fields=login_announcement_field_values()
+    assigned={field['announcement_id'] for field in fields}
+    announcements=[announcement for announcement in announcements if announcement['id'] not in assigned]
     for announcement in announcements: announcement['images']=announcement_image_list(announcement)
-    values = dict(screen=login_screen_values(), announcements=announcements, public_results=published_results())
+    values = dict(screen=login_screen_values(), announcements=announcements, announcement_fields=fields, public_results=published_results())
     values.update(extra)
     return render_template('login.html', **values)
 
@@ -393,18 +422,18 @@ def manage_login_screen():
                 raise ValueError('Kolejność elementów jest nieprawidłowa.')
         except (TypeError, ValueError):
             flash('Nie udało się odczytać układu ekranu. Spróbuj ponownie.', 'error')
-            return render_template('login_screen_admin.html', screen=login_screen_values()), 400
+            return render_template('login_screen_admin.html', **login_screen_admin_context()), 400
         limits = {'info_title':160,'info_body':1000,'ideas_title':100,'ideas_body':500,'voting_title':100,'voting_body':500,'results_title':100,'results_body':500}
         if any(not values[key] or len(values[key]) > limit for key,limit in limits.items()):
             flash('Uzupełnij wszystkie pola i sprawdź ich długość.', 'error')
             values['layout'] = layout
-            return render_template('login_screen_admin.html', screen=values), 400
+            return render_template('login_screen_admin.html', **login_screen_admin_context(values)), 400
         try:
             logo_upload=read_login_screen_upload()
         except ValueError as error:
             flash(str(error), 'error')
             values['layout']=layout
-            return render_template('login_screen_admin.html', screen=values), 400
+            return render_template('login_screen_admin.html', **login_screen_admin_context(values)), 400
         else:
             with engine.begin() as c:
                 for key,value in values.items():
@@ -428,7 +457,7 @@ def manage_login_screen():
                     c.execute(delete(login_screen_images).where(login_screen_images.c.id==1))
             flash('Zapisano treść publicznego ekranu logowania.', 'success')
             return redirect('/admin/login-screen')
-    return render_template('login_screen_admin.html', screen=login_screen_values())
+    return render_template('login_screen_admin.html', **login_screen_admin_context())
 
 @app.get('/login-screen-logo')
 def login_screen_logo():
@@ -458,6 +487,60 @@ def read_announcement_pngs():
         images.append(data)
     return images
 
+@app.post('/admin/login-screen/announcement-fields')
+@access('admin')
+def manage_login_announcement_fields():
+    action=request.form.get('action','create')
+    try:
+        if action=='create':
+            source_type=request.form.get('source_type','existing')
+            if source_type=='new':
+                title=request.form.get('title','').strip()
+                body=request.form.get('body','').strip()
+                if not title or len(title)>160 or not body or len(body)>10000:
+                    raise ValueError('Podaj tytuł (maks. 160 znaków) i treść (maks. 10 000 znaków) ogłoszenia.')
+                images=read_announcement_pngs()
+                with engine.begin() as c:
+                    announcement_id=c.execute(insert(login_announcements).values(title=title,body=body,created=now().isoformat(timespec='minutes'),pinned=1)).inserted_primary_key[0]
+                    for image in images:
+                        c.execute(insert(announcement_images).values(announcement_id=announcement_id,image_data=image))
+                    position=(c.scalar(select(func.max(login_announcement_fields.c.position))) or 0)+1
+                    c.execute(insert(login_announcement_fields).values(announcement_id=announcement_id,position=position))
+            elif source_type=='existing':
+                announcement_id=int(request.form.get('announcement_id',''))
+                with engine.begin() as c:
+                    announcement=c.execute(select(login_announcements.c.id).where(login_announcements.c.id==announcement_id)).first()
+                    if not announcement: raise ValueError('Wybierz istniejące ogłoszenie.')
+                    c.execute(update(login_announcements).where(login_announcements.c.id==announcement_id).values(pinned=1))
+                    position=(c.scalar(select(func.max(login_announcement_fields.c.position))) or 0)+1
+                    c.execute(insert(login_announcement_fields).values(announcement_id=announcement_id,position=position))
+            else:
+                abort(400)
+            flash('Dodano pole z przypiętym ogłoszeniem do ekranu logowania.','success')
+        elif action=='edit':
+            field_id=int(request.form.get('field_id',''))
+            announcement_id=int(request.form.get('announcement_id',''))
+            with engine.begin() as c:
+                field=c.execute(select(login_announcement_fields).where(login_announcement_fields.c.id==field_id).with_for_update()).mappings().first()
+                announcement=c.execute(select(login_announcements.c.id).where(login_announcements.c.id==announcement_id)).first()
+                if not field or not announcement: abort(404)
+                c.execute(update(login_announcements).where(login_announcements.c.id==announcement_id).values(pinned=1))
+                c.execute(update(login_announcement_fields).where(login_announcement_fields.c.id==field_id).values(announcement_id=announcement_id))
+            flash('Zmieniono ogłoszenie w polu ekranu logowania.','success')
+        elif action=='delete':
+            field_id=int(request.form.get('field_id',''))
+            with engine.begin() as c:
+                removed=c.execute(delete(login_announcement_fields).where(login_announcement_fields.c.id==field_id))
+                if not removed.rowcount: abort(404)
+            flash('Usunięto pole z ekranu logowania. Samo ogłoszenie pozostało zapisane.','success')
+        else:
+            abort(400)
+    except ValueError as error:
+        flash(str(error),'error')
+    except IntegrityError:
+        flash('To ogłoszenie jest już przypisane do innego pola.','error')
+    return redirect('/admin/login-screen')
+
 @app.route('/announcements', methods=['GET','POST'])
 @access('guardian','admin')
 def manage_announcements():
@@ -468,6 +551,7 @@ def manage_announcements():
                 announcement_id=int(request.form.get('announcement_id',''))
                 with engine.begin() as c:
                     c.execute(delete(announcement_images).where(announcement_images.c.announcement_id==announcement_id))
+                    c.execute(delete(login_announcement_fields).where(login_announcement_fields.c.announcement_id==announcement_id))
                     removed=c.execute(delete(login_announcements).where(login_announcements.c.id==announcement_id))
                     if not removed.rowcount: abort(404)
                 flash('Usunięto ogłoszenie.', 'success')
@@ -492,6 +576,7 @@ def manage_announcements():
                         if remove_images: values['image_data']=None
                         if current_count+len(images)>5: raise ValueError('Ogłoszenie może mieć maksymalnie 5 obrazów. Usuń obecne obrazy albo dodaj mniej plików.')
                         c.execute(update(login_announcements).where(login_announcements.c.id==announcement_id).values(**values))
+                        if not pinned: c.execute(delete(login_announcement_fields).where(login_announcement_fields.c.announcement_id==announcement_id))
                         if remove_images: c.execute(delete(announcement_images).where(announcement_images.c.announcement_id==announcement_id))
                         for image in images:
                             c.execute(insert(announcement_images).values(announcement_id=announcement_id,image_data=image))
