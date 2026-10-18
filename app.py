@@ -37,6 +37,7 @@ poll_voter_removals = Table('poll_voter_removals', meta, Column('voter_id', BigI
 poll_deletion_requests = Table('poll_deletion_requests', meta, Column('poll_id', Integer, primary_key=True), Column('requester', Integer), Column('created', String(30)))
 login_announcements = Table('login_announcements', meta, Column('id', Integer, primary_key=True), Column('title', String(160), nullable=False), Column('body', Text, nullable=False), Column('image_data', LargeBinary), Column('created', String(30)))
 announcement_images = Table('announcement_images', meta, Column('id', Integer, primary_key=True), Column('announcement_id', Integer, nullable=False), Column('image_data', LargeBinary, nullable=False))
+login_screen_images = Table('login_screen_images', meta, Column('id', Integer, primary_key=True), Column('image_data', LargeBinary, nullable=False), Column('mime_type', String(40), nullable=False))
 portal_settings = Table('portal_settings', meta, Column('key', String(100), primary_key=True), Column('value', Text, nullable=False))
 meta.create_all(engine)
 if 'results_public' not in {column['name'] for column in inspect(engine).get_columns('polls')}:
@@ -302,6 +303,49 @@ def submit_external_idea():
     flash('Twój pomysł został wysłany do skrzynki pomysłów samorządu. Dziękujemy!', 'success')
     return redirect('/login')
 
+def jpeg_dimensions(data):
+    offset=2
+    frame_markers={0xC0,0xC1,0xC2,0xC3,0xC5,0xC6,0xC7,0xC9,0xCA,0xCB,0xCD,0xCE,0xCF}
+    while offset+4<=len(data):
+        if data[offset]!=0xFF:
+            offset+=1
+            continue
+        while offset<len(data) and data[offset]==0xFF: offset+=1
+        if offset>=len(data): break
+        marker=data[offset]
+        offset+=1
+        if marker in (0xD8,0xD9,0x01) or 0xD0<=marker<=0xD7: continue
+        if offset+2>len(data): break
+        segment_length=int.from_bytes(data[offset:offset+2],'big')
+        if segment_length<2 or offset+segment_length>len(data): break
+        if marker in frame_markers and segment_length>=7:
+            height=int.from_bytes(data[offset+3:offset+5],'big')
+            width=int.from_bytes(data[offset+5:offset+7],'big')
+            return width,height
+        if marker==0xDA: break
+        offset+=segment_length
+    return None
+
+def read_login_screen_upload():
+    upload=request.files.get('logo_image')
+    if not upload or not upload.filename: return None
+    data=upload.stream.read(5*1024*1024+1)
+    if len(data)>5*1024*1024: raise ValueError('Zdjęcie może mieć maksymalnie 5 MB.')
+    if data.startswith(b'\x89PNG\r\n\x1a\n') and len(data)>=24 and data[12:16]==b'IHDR':
+        mime_type='image/png'
+        width=int.from_bytes(data[16:20],'big')
+        height=int.from_bytes(data[20:24],'big')
+    elif data.startswith(b'\xff\xd8\xff'):
+        dimensions=jpeg_dimensions(data)
+        if not dimensions: raise ValueError('Nie udało się odczytać wymiarów zdjęcia JPEG.')
+        width,height=dimensions
+        mime_type='image/jpeg'
+    else:
+        raise ValueError('Wybierz obraz PNG lub JPG.')
+    if not width or not height or width*height>25_000_000:
+        raise ValueError('Zdjęcie ma nieprawidłowe lub zbyt duże wymiary.')
+    return data,mime_type
+
 @app.route('/admin/login-screen', methods=['GET','POST'])
 @access('admin')
 def manage_login_screen():
@@ -327,6 +371,12 @@ def manage_login_screen():
             flash('Uzupełnij wszystkie pola i sprawdź ich długość.', 'error')
             values['layout'] = layout
             return render_template('login_screen_admin.html', screen=values), 400
+        try:
+            logo_upload=read_login_screen_upload()
+        except ValueError as error:
+            flash(str(error), 'error')
+            values['layout']=layout
+            return render_template('login_screen_admin.html', screen=values), 400
         else:
             with engine.begin() as c:
                 for key,value in values.items():
@@ -340,9 +390,29 @@ def manage_login_screen():
                     c.execute(update(portal_settings).where(portal_settings.c.key==layout_key).values(value=layout_value))
                 else:
                     c.execute(insert(portal_settings).values(key=layout_key,value=layout_value))
+                if logo_upload:
+                    image_data,mime_type=logo_upload
+                    if c.scalar(select(login_screen_images.c.id).where(login_screen_images.c.id==1)):
+                        c.execute(update(login_screen_images).where(login_screen_images.c.id==1).values(image_data=image_data,mime_type=mime_type))
+                    else:
+                        c.execute(insert(login_screen_images).values(id=1,image_data=image_data,mime_type=mime_type))
+                elif request.form.get('reset_logo')=='1':
+                    c.execute(delete(login_screen_images).where(login_screen_images.c.id==1))
             flash('Zapisano treść publicznego ekranu logowania.', 'success')
             return redirect('/admin/login-screen')
     return render_template('login_screen_admin.html', screen=login_screen_values())
+
+@app.get('/login-screen-logo')
+def login_screen_logo():
+    found=rows(login_screen_images, login_screen_images.c.id==1)
+    if found:
+        response=send_file(io.BytesIO(found[0]['image_data']),mimetype=found[0]['mime_type'],as_attachment=False,conditional=False)
+    else:
+        response=send_file(os.path.join(app.root_path,'static','school_logo.png'),mimetype='image/png',as_attachment=False,conditional=False)
+    response.headers['Content-Disposition']='inline'
+    response.headers['Cache-Control']='no-store'
+    response.headers['X-Content-Type-Options']='nosniff'
+    return response
 
 def read_announcement_pngs():
     uploads=[upload for upload in request.files.getlist('images') if upload and upload.filename]
