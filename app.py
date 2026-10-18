@@ -490,7 +490,8 @@ def idea_box():
         flash('Pomysł został opublikowany.'); return redirect('/ideas')
     request_rows=rows(vote_requests)
     approved_sources={(r['source_type'],r['source_id']) for r in request_rows if r['status']=='approved'}
-    return render_template('ideas.html', entries=[e for e in rows(ideas)[::-1] if ('internal',e['id']) not in approved_sources], names={u['id']:u['name'] for u in rows(users)}, editing=None, external_entries=[e for e in rows(external_ideas)[::-1] if ('external',e['id']) not in approved_sources], pending_removals={r['idea']:r for r in rows(idea_removals)}, vote_request_status={(r['source_type'],r['source_id']):r for r in request_rows})
+    draft_polls=[p for p in sorted(rows(polls, polls.c.archived==0),key=lambda item:item['id'],reverse=True) if poll_state(p)=='draft']
+    return render_template('ideas.html', entries=[e for e in rows(ideas)[::-1] if ('internal',e['id']) not in approved_sources], names={u['id']:u['name'] for u in rows(users)}, editing=None, external_entries=[e for e in rows(external_ideas)[::-1] if ('external',e['id']) not in approved_sources], pending_removals={r['idea']:r for r in rows(idea_removals)}, vote_request_status={(r['source_type'],r['source_id']):r for r in request_rows}, draft_polls=draft_polls)
 
 @app.route('/ideas/<int:iid>/edit', methods=['GET','POST'])
 @access()
@@ -516,7 +517,7 @@ def delete_idea(iid):
     flash('Pomysł został usunięty.'); return redirect('/ideas')
 
 @app.post('/ideas/<source_type>/<int:item_id>/nominate')
-@access('student')
+@access('student','guardian','admin')
 def nominate_idea(source_type, item_id):
     if source_type == 'internal':
         found = rows(ideas, ideas.c.id == item_id)
@@ -530,10 +531,30 @@ def nominate_idea(source_type, item_id):
         idea = found[0]
         name, school_class, body = idea['name'], idea['school_class'], idea['body']
     else: abort(404)
-    values = dict(requester=g.user['id'], author_name=name[:160], school_class=school_class[:60], body=body[:10000], status='pending', poll_id=None, created=now().isoformat(timespec='minutes'))
+    direct=g.user['role'] in ('guardian','admin')
+    values = dict(requester=g.user['id'], author_name=name[:160], school_class=school_class[:60], body=body[:10000], status='approved' if direct else 'pending', poll_id=None, created=now().isoformat(timespec='minutes'))
     with engine.begin() as c:
         prior = c.execute(select(vote_requests).where(vote_requests.c.source_type==source_type, vote_requests.c.source_id==item_id).with_for_update()).mappings().first()
-        if prior and prior['status'] in ('pending','approved'):
+        if direct and prior and prior['status']=='approved':
+            flash('Ten pomysł jest już dodany do głosowania.')
+        elif direct:
+            poll_id=request.form.get('poll_id','').strip()
+            title=request.form.get('new_poll_title','').strip()
+            if bool(poll_id)==bool(title): abort(400)
+            if title:
+                if len(title)>200: abort(400)
+                poll_id=c.execute(insert(polls).values(title=title,created_by=g.user['id'],created=now().isoformat(timespec='minutes'),starts_at=None,ends_at=None)).inserted_primary_key[0]
+            else:
+                try: poll_id=int(poll_id)
+                except ValueError: abort(400)
+                target=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
+                if not target or target['archived'] or poll_state(target)!='draft': abort(400, 'Wybierz głosowanie, które jest jeszcze w przygotowaniu.')
+            c.execute(insert(poll_options).values(poll_id=poll_id,source_type=source_type,source_id=item_id,author_name=name[:160],school_class=school_class[:60],body=body[:10000],created=now().isoformat(timespec='minutes')))
+            values['poll_id']=poll_id
+            if prior: c.execute(update(vote_requests).where(vote_requests.c.id==prior['id']).values(**values))
+            else: c.execute(insert(vote_requests).values(source_type=source_type,source_id=item_id,**values))
+            flash('Pomysł dodano bezpośrednio do głosowania.', 'success')
+        elif prior and prior['status'] in ('pending','approved'):
             flash('Ten pomysł został już zgłoszony do głosowania.' if prior['status']=='pending' else 'Ten pomysł jest już dodany do głosowania.')
         elif prior:
             c.execute(update(vote_requests).where(vote_requests.c.id==prior['id']).values(**values))
@@ -746,10 +767,18 @@ def decide_vote_request(request_id):
 @app.post('/voting/polls/<int:poll_id>/schedule')
 @access('guardian','admin')
 def schedule_poll(poll_id):
-    start = local_datetime(request.form.get('starts_at',''))
-    end = local_datetime(request.form.get('ends_at',''))
-    if start <= now() or end <= start:
-        flash('Data początku musi być w przyszłości, a koniec późniejszy od początku.', 'error')
+    start_value=request.form.get('starts_at','').strip()
+    end_value=request.form.get('ends_at','').strip()
+    try:
+        start=(datetime.strptime(start_value,'%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('Europe/Warsaw'))
+               if start_value else now().replace(second=0,microsecond=0))
+        end=datetime.strptime(end_value,'%Y-%m-%dT%H:%M').replace(tzinfo=ZoneInfo('Europe/Warsaw'))
+    except ValueError:
+        flash('Wybierz prawidłową datę i godzinę zakończenia oraz — jeśli głosowanie ma ruszyć później — rozpoczęcia.', 'error')
+        return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
+    current_minute=now().replace(second=0,microsecond=0)
+    if start < current_minute or end <= start:
+        flash('Data rozpoczęcia nie może być wcześniejsza niż bieżąca minuta, a zakończenie musi być późniejsze od rozpoczęcia.', 'error')
         return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
