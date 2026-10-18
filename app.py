@@ -1,4 +1,4 @@
-import os, secrets, io, time, hmac, hashlib, unicodedata
+import os, secrets, io, time, hmac, hashlib, unicodedata, json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from functools import wraps
@@ -157,6 +157,32 @@ LOGIN_SCREEN_DEFAULTS = {
     'results_body': 'Zobacz wyniki udostępnione przez opiekunów samorządu.'
 }
 
+LOGIN_LAYOUT_DEFAULTS = {
+    'login': {'columns': 7, 'rows': 2, 'order': 0},
+    'announcements': {'columns': 5, 'rows': 1, 'order': 1},
+    'ideas': {'columns': 5, 'rows': 1, 'order': 2},
+    'voting': {'columns': 5, 'rows': 1, 'order': 3},
+    'results': {'columns': 5, 'rows': 1, 'order': 4},
+}
+
+def normalize_login_layout(value):
+    """Return only safe, bounded layout values for public CSS grid placement."""
+    if isinstance(value, str):
+        try: value = json.loads(value)
+        except (TypeError, ValueError): value = None
+    if not isinstance(value, dict): return {key: dict(item) for key, item in LOGIN_LAYOUT_DEFAULTS.items()}
+    normalized = {}
+    for key, defaults in LOGIN_LAYOUT_DEFAULTS.items():
+        item = value.get(key, {})
+        if not isinstance(item, dict): item = {}
+        parsed = {}
+        for field, low, high in (('columns', 3, 12), ('rows', 1, 5), ('order', 0, 4)):
+            try: number = int(item.get(field, defaults[field]))
+            except (TypeError, ValueError): number = defaults[field]
+            parsed[field] = max(low, min(high, number))
+        normalized[key] = parsed
+    return normalized
+
 def login_screen_values():
     values = dict(LOGIN_SCREEN_DEFAULTS)
     prefix = 'login_screen_'
@@ -164,6 +190,8 @@ def login_screen_values():
         if setting['key'].startswith(prefix):
             key = setting['key'][len(prefix):]
             if key in values: values[key] = setting['value']
+            elif key == 'layout': values['layout'] = normalize_login_layout(setting['value'])
+    values['layout'] = normalize_login_layout(values.get('layout'))
     return values
 
 def published_results():
@@ -261,9 +289,25 @@ def submit_external_idea():
 def manage_login_screen():
     if request.method == 'POST':
         values = {key:request.form.get(key,'').strip() for key in LOGIN_SCREEN_DEFAULTS}
+        try:
+            layout_data = json.loads(request.form.get('layout', '{}'))
+            layout = normalize_login_layout(layout_data)
+            if not isinstance(layout_data, dict) or any(not isinstance(layout_data.get(key), dict) for key in LOGIN_LAYOUT_DEFAULTS):
+                raise ValueError('Nieprawidłowy układ elementów.')
+            for key, bounds in LOGIN_LAYOUT_DEFAULTS.items():
+                for field, low, high in (('columns', 3, 12), ('rows', 1, 5), ('order', 0, 4)):
+                    raw = layout_data[key].get(field)
+                    if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+                        raise ValueError('Sprawdź położenie i rozmiar elementów.')
+            if len({item['order'] for item in layout.values()}) != len(layout):
+                raise ValueError('Kolejność elementów jest nieprawidłowa.')
+        except (TypeError, ValueError):
+            flash('Nie udało się odczytać układu ekranu. Spróbuj ponownie.', 'error')
+            return render_template('login_screen_admin.html', screen=login_screen_values()), 400
         limits = {'info_title':160,'info_body':1000,'ideas_title':100,'ideas_body':500,'voting_title':100,'voting_body':500,'results_title':100,'results_body':500}
         if any(not values[key] or len(values[key]) > limit for key,limit in limits.items()):
             flash('Uzupełnij wszystkie pola i sprawdź ich długość.', 'error')
+            values['layout'] = layout
             return render_template('login_screen_admin.html', screen=values), 400
         else:
             with engine.begin() as c:
@@ -272,6 +316,12 @@ def manage_login_screen():
                     exists=c.scalar(select(portal_settings.c.key).where(portal_settings.c.key==setting_key))
                     if exists: c.execute(update(portal_settings).where(portal_settings.c.key==setting_key).values(value=value))
                     else: c.execute(insert(portal_settings).values(key=setting_key,value=value))
+                layout_key='login_screen_layout'
+                layout_value=json.dumps(layout, separators=(',', ':'))
+                if c.scalar(select(portal_settings.c.key).where(portal_settings.c.key==layout_key)):
+                    c.execute(update(portal_settings).where(portal_settings.c.key==layout_key).values(value=layout_value))
+                else:
+                    c.execute(insert(portal_settings).values(key=layout_key,value=layout_value))
             flash('Zapisano treść publicznego ekranu logowania.', 'success')
             return redirect('/admin/login-screen')
     return render_template('login_screen_admin.html', screen=login_screen_values())
@@ -519,27 +569,27 @@ def edit_unstarted_poll(poll_id):
     end_value=request.form.get('ends_at','').strip()
     if not title or len(title)>200:
         flash('Nazwa głosowania musi mieć od 1 do 200 znaków.', 'error')
-        return redirect('/voting?tab=created')
+        return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
     if bool(start_value) != bool(end_value):
         flash('Podaj obie daty albo pozostaw obie puste.', 'error')
-        return redirect('/voting?tab=created')
+        return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
     start=end=None
     if start_value:
         start=local_datetime(start_value)
         end=local_datetime(end_value)
         if start<=now() or end<=start:
             flash('Data początku musi być w przyszłości, a koniec późniejszy od początku.', 'error')
-            return redirect('/voting?tab=created')
+            return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
         if poll_state(poll) not in ('draft','scheduled'): abort(400, 'Nie można edytować głosowania, które już się rozpoczęło.')
         if start and not c.scalar(select(func.count()).select_from(poll_options).where(poll_options.c.poll_id==poll_id)):
             flash('Dodaj co najmniej jeden pomysł przed ustawieniem dat głosowania.', 'error')
-            return redirect('/voting?tab=created')
+            return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
         c.execute(update(polls).where(polls.c.id==poll_id).values(title=title,starts_at=start.isoformat(timespec='minutes') if start else None,ends_at=end.isoformat(timespec='minutes') if end else None))
     flash('Zapisano zmiany w głosowaniu.', 'success')
-    return redirect('/voting?tab=created')
+    return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
 
 @app.post('/voting/polls/<int:poll_id>/options/<int:option_id>/remove')
 @access('guardian','admin')
@@ -553,11 +603,12 @@ def remove_poll_option(poll_id, option_id):
             c.execute(update(vote_requests).where(vote_requests.c.source_type==option['source_type'],vote_requests.c.source_id==option['source_id'],vote_requests.c.poll_id==poll_id).values(status='pending',poll_id=None))
         c.execute(delete(poll_options).where(poll_options.c.id==option_id))
     flash('Usunięto pomysł z głosowania. Zgłoszenie wróciło do oczekujących.', 'success')
-    return redirect('/voting?tab=created')
+    return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
 
 @app.post('/voting/polls/<int:poll_id>/delete-request')
 @access('guardian','admin')
 def request_poll_deletion(poll_id):
+    removed = g.user['role']=='admin'
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
@@ -571,7 +622,7 @@ def request_poll_deletion(poll_id):
             else:
                 c.execute(insert(poll_deletion_requests).values(poll_id=poll_id,requester=g.user['id'],created=now().isoformat(timespec='minutes')))
                 flash('Wysłano prośbę o usunięcie do administratora.', 'success')
-    return redirect('/voting?tab=created')
+    return redirect('/voting?tab=created' if removed else '/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
 
 @app.post('/voting/poll-deletion-requests/<int:poll_id>')
 @access('admin')
@@ -651,19 +702,19 @@ def decide_vote_request(request_id):
 def schedule_poll(poll_id):
     start = local_datetime(request.form.get('starts_at',''))
     end = local_datetime(request.form.get('ends_at',''))
-    if end <= start or end <= now():
-        flash('Data zakończenia musi być późniejsza od rozpoczęcia i od obecnej chwili.')
-        return redirect('/voting?tab=created')
+    if start <= now() or end <= start:
+        flash('Data początku musi być w przyszłości, a koniec późniejszy od początku.', 'error')
+        return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
     with engine.begin() as c:
         poll=c.execute(select(polls).where(polls.c.id==poll_id).with_for_update()).mappings().first()
         if not poll: abort(404)
         if poll_state(poll)!='draft': abort(400)
         if not c.scalar(select(func.count()).select_from(poll_options).where(poll_options.c.poll_id==poll_id)):
             flash('Dodaj co najmniej jeden pomysł do tego głosowania przed jego uruchomieniem.')
-            return redirect('/voting?tab=created')
+            return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
         c.execute(update(polls).where(polls.c.id==poll_id).values(starts_at=start.isoformat(timespec='minutes'),ends_at=end.isoformat(timespec='minutes')))
     flash('Ustawiono harmonogram głosowania.', 'success')
-    return redirect('/voting?tab=created')
+    return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
 
 def cast_ballot(poll_id, option_id, kind, display_name, school_class='', internal_user=None):
     try:
@@ -689,7 +740,7 @@ def cast_internal_vote(poll_id):
     except ValueError: abort(400)
     ok, message = cast_ballot(poll_id,option_id,'internal',g.user['name'],internal_user=g.user['id'])
     flash(message, 'success' if ok else 'error')
-    return redirect('/voting?tab=created')
+    return redirect('/voting?tab=created&poll_id='+str(poll_id)+'#poll-detail')
 
 @app.get('/public-voting')
 def public_voting():
