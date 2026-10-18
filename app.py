@@ -1132,13 +1132,13 @@ def chat():
             try: poll_data=json.loads(request.form.get('poll_payload','{}'))
             except (TypeError,ValueError): abort(400,'Ankieta ma nieprawidłowy format.')
             questions=poll_data.get('questions') if isinstance(poll_data,dict) else None
-            if not isinstance(questions,list) or not 1<=len(questions)<=10: abort(400,'Ankieta musi mieć od 1 do 10 pytań.')
+            if not isinstance(questions,list) or len(questions)!=1: abort(400,'Ankieta może zawierać dokładnie jedno pytanie.')
             cleaned=[]
             for question in questions:
                 if not isinstance(question,dict): abort(400,'Sprawdź treść pytań w ankiecie.')
                 question_body=' '.join(str(question.get('body','')).split())
                 options=question.get('options')
-                if not question_body or len(question_body)>500 or not isinstance(options,list) or not 2<=len(options)<=8: abort(400,'Każde pytanie musi mieć treść oraz co najmniej dwie odpowiedzi.')
+                if not question_body or len(question_body)>500 or not isinstance(options,list) or not 2<=len(options)<=10: abort(400,'Ankieta musi mieć jedno pytanie i od 2 do 10 opcji odpowiedzi.')
                 option_values=[' '.join(str(option).split()) for option in options]
                 if any(not option or len(option)>200 for option in option_values) or len(set(option.lower() for option in option_values))!=len(option_values): abort(400,'Uzupełnij różne odpowiedzi do każdego pytania.')
                 cleaned.append(dict(body=question_body,options=option_values))
