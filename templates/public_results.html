@@ -4,7 +4,7 @@
 <p class="subtitle">Wyniki udostępnione przez opiekunów. Widać wyłącznie liczbę głosów — bez listy osób głosujących.</p>
 <div class="tabs"><a href="/login">Logowanie</a><a href="/public-voting">Głosowania</a><a class="selected" href="/public-results">Wyniki głosowań</a></div>
 {% for result in results %}
-<section class="card poll-card"><span class="badge state-closed">Zakończone</span><h2><a href="/public-results?poll_id={{ result.poll.id }}">{{ result.poll.title }}</a></h2><p>Łącznie oddano {{ result.total }} głosów.</p>{% if selected and selected.poll.id==result.poll.id %}<div class="public-result-counts">{% for option in result.options %}<div class="tally-row"><strong>{{ option.author_name }}</strong><strong class="tally-count">{{ option.votes }} gł.</strong></div>{% endfor %}</div>{% else %}<a class="button secondary" href="/public-results?poll_id={{ result.poll.id }}">Pokaż liczby głosów</a>{% endif %}</section>
+<section class="card poll-card"><span class="badge state-closed">Zakończone</span><h2><a href="/public-results?poll_id={{ result.poll.id }}">{{ result.poll.title }}</a></h2><p>Łącznie oddano {{ result.total }} głosów.</p>{% if selected and selected.poll.id==result.poll.id %}<div class="public-result-counts">{% for option in result.options %}<div class="tally-row"><span>{{ option.body }}</span><strong class="tally-count">{{ option.votes }} gł.</strong></div>{% endfor %}</div>{% else %}<a class="button secondary" href="/public-results?poll_id={{ result.poll.id }}">Pokaż liczby głosów</a>{% endif %}</section>
 {% else %}<section class="card"><p>Nie opublikowano jeszcze wyników głosowań.</p></section>{% endfor %}
 <p><a href="/login">Powrót do logowania</a></p>
 {% endblock %}

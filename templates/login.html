@@ -47,7 +47,7 @@
     </section>
     <section class="layout-panel voting-card" id="public-voting" style="grid-column:span {{ screen.layout.voting.columns }};grid-row:span {{ screen.layout.voting.rows }};order:{{ screen.layout.voting.order }}"><div class="external-heading"><span aria-hidden="true">✓</span><h2>{{ screen.voting_title }}</h2></div><p>{{ screen.voting_body }}</p><a class="public-button" href="/public-voting">Zobacz głosowania</a></section>
     <section class="layout-panel results-card" id="public-results" style="grid-column:span {{ screen.layout.results.columns }};grid-row:span {{ screen.layout.results.rows }};order:{{ screen.layout.results.order }}"><div class="external-heading"><span aria-hidden="true">▤</span><h2>{{ screen.results_title }}</h2></div><p>{{ screen.results_body }}</p>
-      {% for result in public_results %}<details class="public-result"><summary>{{ result.poll.title }} · {{ result.total }} głosów</summary><div class="public-result-counts">{% for option in result.options %}<p><span>{{ option.author_name }}</span><strong>{{ option.votes }}</strong></p>{% endfor %}</div></details>{% else %}<p class="muted-note">Nie opublikowano jeszcze wyników głosowań.</p>{% endfor %}
+      {% for result in public_results %}<details class="public-result"><summary>{{ result.poll.title }} · {{ result.total }} głosów</summary><div class="public-result-counts">{% for option in result.options %}<p><span>{{ option.body }}</span><strong>{{ option.votes }}</strong></p>{% endfor %}</div></details>{% else %}<p class="muted-note">Nie opublikowano jeszcze wyników głosowań.</p>{% endfor %}
       <a class="public-text-link" href="/public-results">Wszystkie opublikowane wyniki</a>
     </section>
   </main>
