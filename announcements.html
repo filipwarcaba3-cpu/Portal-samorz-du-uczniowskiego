@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Ogłoszenia na ekranie logowania</h1>
+<p class="subtitle">Ogłoszenia widzą osoby niezalogowane. Załączone obrazy PNG są wyświetlane na stronie i nie mają przycisku pobierania.</p>
+
+<section class="card">
+  <h2>Dodaj ogłoszenie</h2>
+  <form method="post" enctype="multipart/form-data" class="announcement-form">
+    <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="action" value="create">
+    <label>Tytuł<input name="title" required maxlength="160"></label>
+    <label>Treść<textarea name="body" required maxlength="10000"></textarea></label>
+    <label>Obraz PNG (maks. 5 MB)<input type="file" name="image" accept="image/png,.png"></label>
+    <button>Opublikuj ogłoszenie</button>
+  </form>
+</section>
+
+<h2>Opublikowane ogłoszenia</h2>
+{% for announcement in announcements %}
+<section class="card announcement-manage-card">
+  <div class="announcement-preview"><div><h3>{{ announcement.title }}</h3><p class="pre">{{ announcement.body }}</p><small>{{ announcement.created|replace('T',' ') }}</small></div>{% if announcement.has_image %}<img src="/login-announcements/{{ announcement.id }}/image" alt="Obraz ogłoszenia {{ announcement.title }}">{% endif %}</div>
+  <details><summary>Edytuj ogłoszenie</summary>
+    <form method="post" enctype="multipart/form-data" class="announcement-form">
+      <input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="action" value="edit"><input type="hidden" name="announcement_id" value="{{ announcement.id }}">
+      <label>Tytuł<input name="title" required maxlength="160" value="{{ announcement.title }}"></label>
+      <label>Treść<textarea name="body" required maxlength="10000">{{ announcement.body }}</textarea></label>
+      <label>Zmień lub dodaj obraz PNG (maks. 5 MB)<input type="file" name="image" accept="image/png,.png"></label>
+      {% if announcement.has_image %}<label class="check-label"><input type="checkbox" name="remove_image" value="1"> Usuń obecny obraz</label>{% endif %}
+      <button>Zapisz zmiany</button>
+    </form>
+  </details>
+  <form method="post" onsubmit="return confirm('Usunąć to ogłoszenie?')"><input type="hidden" name="csrf" value="{{ csrf() }}"><input type="hidden" name="action" value="delete"><input type="hidden" name="announcement_id" value="{{ announcement.id }}"><button class="danger">Usuń ogłoszenie</button></form>
+</section>
+{% else %}<section class="card"><p>Nie dodano jeszcze ogłoszeń.</p></section>{% endfor %}
+<style>.announcement-preview{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,260px);gap:20px;align-items:start}.announcement-preview img{max-width:100%;max-height:220px;object-fit:contain}.announcement-form{max-width:760px}.announcement-form input[type=file]{padding:10px}.announcement-form .check-label{display:flex;gap:10px;align-items:center}.announcement-form .check-label input{width:auto}.announcement-manage-card details{margin:16px 0}@media(max-width:650px){.announcement-preview{grid-template-columns:1fr}}</style>
+{% endblock %}

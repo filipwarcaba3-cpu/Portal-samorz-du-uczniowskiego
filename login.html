@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portal Samorządu Uczniowskiego</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}">
+</head>
+<body>
+  <header class="login-header">
+    <div class="brand">Portal Samorządu<br>Uczniowskiego</div>
+    <div class="school"><strong>{{ screen.info_title }}</strong><p>{{ screen.info_body }}</p></div>
+  </header>
+  <main class="login-layout">
+    <div class="login-main">
+      <div class="picture"><img src="{{ url_for('static', filename='school_logo.png') }}" alt="Logo Zespołu Szkół Muzycznych im. Michała Spisaka w Dąbrowie Górniczej"></div>
+      <section class="login-card" aria-label="Logowanie">
+        <form method="post" action="/login">
+          <input type="hidden" name="csrf" value="{{ csrf() }}">
+          {% for category,msg in get_flashed_messages(with_categories=true) %}<p class="{{ 'public-success' if category=='success' else 'error' }}" role="status">{{ msg }}</p>{% endfor %}
+          <label for="login">Login:</label><input id="login" name="login" autocomplete="username" required maxlength="100">
+          <label for="password">Hasło:</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button class="login-button">Zaloguj</button>
+        </form>
+      </section>
+    </div>
+    <div class="public-sidebar" aria-label="Informacje dla osób niezalogowanych">
+      {% if announcements %}
+      <section class="external-idea-card announcement-card"><div class="external-heading"><span aria-hidden="true">📣</span><h2>Ogłoszenia</h2></div>
+        {% for announcement in announcements %}<article class="public-announcement"><h3>{{ announcement.title }}</h3><p class="announcement-body">{{ announcement.body }}</p>{% if announcement.has_image %}<img class="announcement-image" src="/login-announcements/{{ announcement.id }}/image" alt="Obraz do ogłoszenia: {{ announcement.title }}">{% endif %}<small>{{ announcement.created|replace('T',' ') }}</small></article>{% endfor %}
+      </section>
+      {% endif %}
+      <section class="external-idea-card" id="ideas"><div class="external-heading"><span aria-hidden="true">✉</span><h2>{{ screen.ideas_title }}</h2></div>
+        <p>{{ screen.ideas_body }}</p>
+        <details class="public-idea-details" {% if show_external_form %}open{% endif %}><summary>Dodaj swój pomysł</summary><div class="public-idea-form">
+          {% if external_error %}<p class="error" role="alert">{{ external_error }}</p>{% endif %}
+          <form method="post" action="/external-ideas"><input type="hidden" name="csrf" value="{{ csrf() }}">
+            <label for="external-name">Imię i Nazwisko</label><input type="text" id="external-name" name="name" required maxlength="160" autocomplete="name" value="{{ external_values.name if external_values else '' }}">
+            <label for="external-class">Twoja klasa</label><input type="text" id="external-class" name="school_class" required maxlength="60" placeholder="Np. 2A" value="{{ external_values.school_class if external_values else '' }}">
+            <label for="external-body">Twój pomysł</label><textarea id="external-body" name="body" required maxlength="10000" rows="5" placeholder="Opisz swój pomysł…">{{ external_values.body if external_values else '' }}</textarea>
+            <p class="public-idea-note">Prosimy podać prawdziwe imię i nazwisko oraz klasę, pomysły nieznanych osób nie będą brane pod uwagę.</p><button type="submit">Wyślij do skrzynki pomysłów</button>
+          </form>
+        </div></details>
+      </section>
+      <section class="external-idea-card" id="public-voting"><div class="external-heading"><span aria-hidden="true">✓</span><h2>{{ screen.voting_title }}</h2></div><p>{{ screen.voting_body }}</p><a class="public-button" href="/public-voting">Zobacz głosowania</a></section>
+      <section class="external-idea-card" id="public-results"><div class="external-heading"><span aria-hidden="true">▤</span><h2>{{ screen.results_title }}</h2></div><p>{{ screen.results_body }}</p>
+        {% for result in public_results %}<details class="public-result"><summary>{{ result.poll.title }} · {{ result.total }} głosów</summary><div class="public-result-counts">{% for option in result.options %}<p><span>{{ option.author_name }}</span><strong>{{ option.votes }}</strong></p>{% endfor %}</div></details>{% else %}<p class="muted-note">Nie opublikowano jeszcze wyników głosowań.</p>{% endfor %}
+        <a class="public-text-link" href="/public-results">Wszystkie opublikowane wyniki</a>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
