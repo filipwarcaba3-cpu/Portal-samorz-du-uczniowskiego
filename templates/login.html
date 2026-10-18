@@ -30,7 +30,7 @@
     </section>
     {% if announcements %}
     <section class="layout-panel announcement-card" style="grid-column:span {{ screen.layout.announcements.columns }};grid-row:span {{ screen.layout.announcements.rows }};order:{{ screen.layout.announcements.order }}"><div class="external-heading"><span aria-hidden="true">📣</span><h2>Ogłoszenia</h2></div>
-      {% for announcement in announcements %}<article class="public-announcement"><h3>{{ announcement.title }}</h3><p class="announcement-body">{{ announcement.body }}</p>{% if announcement.has_image %}<img class="announcement-image" src="/login-announcements/{{ announcement.id }}/image" alt="Obraz do ogłoszenia: {{ announcement.title }}">{% endif %}<small>{{ announcement.created|replace('T',' ') }}</small></article>{% endfor %}
+      {% for announcement in announcements %}<article class="public-announcement"><h3>{{ announcement.title }}</h3><p class="announcement-body">{{ announcement.body }}</p>{% if announcement.images %}<div class="announcement-gallery" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">{% for image in announcement.images %}<img class="announcement-image" style="width:100%;height:220px;object-fit:contain" src="{{ image.url }}" alt="Obraz do ogłoszenia: {{ announcement.title }}">{% endfor %}</div>{% endif %}<small>{{ announcement.created|replace('T',' ') }}</small></article>{% endfor %}
     </section>
     {% endif %}
     <section class="layout-panel ideas-card" id="ideas" style="grid-column:span {{ screen.layout.ideas.columns }};grid-row:span {{ screen.layout.ideas.rows }};order:{{ screen.layout.ideas.order }}"><div class="external-heading"><span aria-hidden="true">✉</span><h2>{{ screen.ideas_title }}</h2></div>
