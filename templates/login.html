@@ -50,6 +50,16 @@
       {% for result in public_results %}<details class="public-result"><summary>{{ result.poll.title }} · {{ result.total }} głosów</summary><div class="public-result-counts">{% for option in result.options %}<p><span>{{ option.body }}</span><strong>{{ option.votes }}</strong></p>{% endfor %}</div></details>{% else %}<p class="muted-note">Nie opublikowano jeszcze wyników głosowań.</p>{% endfor %}
       <a class="public-text-link" href="/public-results">Wszystkie opublikowane wyniki</a>
     </section>
+    {% for field in announcement_fields %}
+    <section class="layout-panel announcement-field-card" style="grid-column:span 5;grid-row:span 1;order:{{ 10 + loop.index }}">
+      <div class="announcement-field-divider" aria-hidden="true">-------------------</div>
+      <span class="pinned-label">📌 Przypięte ogłoszenie</span>
+      <h2>{{ field.announcement.title }}</h2>
+      <p class="announcement-body">{{ field.announcement.body }}</p>
+      {% if field.announcement.images %}<div class="announcement-field-gallery">{% for image in field.announcement.images %}<img class="announcement-image" src="{{ image.url }}" alt="Obraz do ogłoszenia: {{ field.announcement.title }}">{% endfor %}</div>{% endif %}
+      <div class="announcement-field-divider" aria-hidden="true">-------------------</div>
+    </section>
+    {% endfor %}
   </main>
   <style>
     .announcement-card{height:calc(165px * var(--announcement-rows));max-height:calc(165px * var(--announcement-rows));align-self:start;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
@@ -57,6 +67,12 @@
     .public-announcement.pinned{background:#fffdf5;border-color:#edce75;box-shadow:0 3px 12px #765b1510}
     .public-announcement h3{font-size:16px;margin:0 0 4px;color:#193b4b}
     .pinned-label{display:inline-block;margin-bottom:6px;color:#8b6412;font-size:12px;font-weight:700}
+    .announcement-field-card{border:4px solid #111!important;border-radius:10px;background:#fff;box-shadow:0 4px 14px #11111112}
+    .announcement-field-card h2{font-size:19px;color:#111;margin:8px 0}
+    .announcement-field-card .pinned-label{color:#111;font-size:13px}
+    .announcement-field-divider{overflow:hidden;white-space:nowrap;color:#111;font-weight:900;letter-spacing:1px;line-height:1.1}
+    .announcement-field-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px}
+    .announcement-field-gallery .announcement-image{height:180px}
     .announcement-card::-webkit-scrollbar{width:9px}.announcement-card::-webkit-scrollbar-thumb{background:#c4d2d8;border:2px solid #f5fafb;border-radius:8px}
     @media(max-width:850px){.announcement-card{height:calc(165px * var(--announcement-rows));max-height:calc(165px * var(--announcement-rows))}}
   </style>
