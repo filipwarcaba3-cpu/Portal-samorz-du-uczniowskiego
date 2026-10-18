@@ -2,6 +2,7 @@
 {% block content %}
 <h1>Głosowania samorządu</h1>
 <p class="subtitle">Wybierz głosowanie, w którym chcesz wziąć udział.</p>
+<div class="tabs"><a class="selected" href="/public-voting">Głosowania</a><a href="/public-results">Wyniki głosowań</a><a href="/login">Logowanie</a></div>
 {% for poll in polls %}
   <section class="card poll-card"><span class="badge poll-state state-{{ poll.state }}">{{ 'Zaplanowane' if poll.state=='scheduled' else 'Trwa' }}</span><h2>{{ poll.title }}</h2><p>{{ 'Rozpoczęcie: ' ~ poll.starts_at|replace('T',' ') if poll.state=='scheduled' else 'Głosowanie kończy się: ' ~ poll.ends_at|replace('T',' ') }}</p><a class="button" href="/public-voting/{{ poll.id }}">{{ 'Szczegóły' if poll.state=='scheduled' else 'Przejdź do głosowania' }}</a></section>
 {% else %}<section class="card"><p>Nie ma teraz otwartych ani zaplanowanych głosowań.</p></section>{% endfor %}
